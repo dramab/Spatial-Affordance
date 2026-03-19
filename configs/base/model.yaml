@@ -1,0 +1,35 @@
+# ============================================================
+# configs/base/model.yaml
+# 模型结构超参配置（backbone类型、融合层数、head参数）
+# ============================================================
+
+image_backbone:
+  type: "resnet50"          # resnet50 | resnet101 | vit_base
+  pretrained: true
+  out_channels: 256
+  freeze: false
+
+pc_backbone:
+  type: "pointnet2"         # pointnet2 | pointtransformer
+  in_channels: 6            # xyz + rgb
+  out_channels: 256
+  num_points: 1024          # 下采样后保留点数
+  num_layers: 4
+
+text_encoder:
+  type: "bert-base-uncased"
+  out_channels: 256
+  max_length: 64
+  freeze: false
+
+fusion:
+  type: "cross_attention"
+  num_layers: 3
+  num_heads: 8
+  hidden_dim: 256
+  dropout: 0.1
+
+bbox3d_head:
+  hidden_dim: 256
+  num_layers: 2
+  out_dim: 7                # cx, cy, cz, l, w, h, yaw

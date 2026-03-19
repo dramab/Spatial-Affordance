@@ -1,0 +1,32 @@
+# ============================================================
+# configs/experiments/baseline.yaml
+# 基线实验配置，继承base配置并覆盖特定参数
+# ============================================================
+
+defaults:
+  - /base/model
+  - /base/train
+  - /base/dataset
+  - _self_
+
+# 实验标识
+experiment:
+  name: "baseline_resnet50_pointnet2"
+  tags: ["baseline", "resnet50", "pointnet2"]
+
+# 覆盖base配置的参数
+batch_size: 8
+num_epochs: 50
+
+optimizer:
+  lr: 5.0e-5
+
+image_backbone:
+  type: "resnet50"
+  freeze: false
+
+pc_backbone:
+  num_points: 1024
+
+logging:
+  use_wandb: true

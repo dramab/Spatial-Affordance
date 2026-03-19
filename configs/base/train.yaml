@@ -1,0 +1,46 @@
+# ============================================================
+# configs/base/train.yaml
+# 训练超参配置（lr、batch_size、scheduler、loss权重、amp）
+# ============================================================
+
+seed: 42
+num_epochs: 100
+batch_size: 16
+num_workers: 8
+pin_memory: true
+
+optimizer:
+  type: "adamw"
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  backbone_lr_scale: 0.1   # backbone使用更小的学习率
+
+scheduler:
+  type: "cosine"
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+
+amp:
+  enabled: true             # 混合精度训练
+  dtype: "float16"
+
+loss_weights:
+  l1: 5.0
+  giou3d: 2.0
+  yaw: 1.0
+
+grad_clip:
+  enabled: true
+  max_norm: 1.0
+
+checkpoint:
+  save_dir: "outputs/checkpoints"
+  save_top_k: 3
+  monitor: "val/acc@0.5"
+  mode: "max"
+
+logging:
+  use_wandb: false
+  use_tensorboard: true
+  log_dir: "outputs/logs"
+  log_interval: 50          # 每N步记录一次

@@ -1,0 +1,40 @@
+# ============================================================
+# configs/base/dataset.yaml
+# 数据集路径、点云采样数、图像分辨率、增强策略配置
+# ============================================================
+
+data_root: "data/processed"
+annotation_file:
+  train: "data/annotations/train.json"
+  val: "data/annotations/val.json"
+  test: "data/annotations/test.json"
+
+image:
+  height: 480
+  width: 640
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+pointcloud:
+  num_points: 20000         # 原始点云采样数
+  use_color: true           # 是否使用RGB颜色特征
+  voxel_size: 0.02          # 体素下采样尺寸（米）
+
+augmentation:
+  train:
+    image:
+      random_flip: true
+      color_jitter: true
+      random_crop: false
+    pointcloud:
+      random_flip: true
+      random_rotate: true   # 绕Z轴随机旋转
+      random_scale: true
+      scale_range: [0.9, 1.1]
+      random_jitter: true
+      jitter_std: 0.01
+  val:
+    image:
+      random_flip: false
+    pointcloud:
+      random_flip: false

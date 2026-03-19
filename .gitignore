@@ -1,0 +1,46 @@
+# 数据与输出（不入git）
+data/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# 日志与缓存
+*.log
+.cache/
+wandb/
+runs/
+lightning_logs/
+
+# 模型权重（大文件）
+*.pth
+*.pt
+*.ckpt
+*.bin
+
+# 系统文件
+.DS_Store
+Thumbs.db

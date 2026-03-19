@@ -1,0 +1,38 @@
+# ============================================================
+# configs/annotation/auto_label.yaml
+# 自动标注流程配置（Grounded-DINO + SAM2 + 深度反投影 + bbox拟合）
+# ============================================================
+
+input:
+  raw_data_root: "data/raw"
+  output_root: "data/annotations"
+  split: "train"            # train | val | test
+
+grounded_dino:
+  model_id: "IDEA-Research/grounding-dino-base"
+  box_threshold: 0.35
+  text_threshold: 0.25
+  device: "cuda"
+
+sam2:
+  model_id: "facebook/sam2-hiera-large"
+  device: "cuda"
+  multimask_output: false
+
+depth_lifter:
+  min_depth: 0.1            # 最小有效深度（米）
+  max_depth: 10.0           # 最大有效深度（米）
+  use_depth_completion: false
+
+bbox_fitter:
+  method: "pca"             # pca | aabb（轴对齐包围盒）
+  min_points: 50            # 最少点数，否则跳过
+
+quality_filter:
+  min_confidence: 0.5       # Grounded-DINO置信度阈值
+  min_points: 100           # 3D点云子集最少点数
+  max_aspect_ratio: 10.0    # bbox最大长宽比
+
+output:
+  save_visualizations: false
+  num_workers: 4
