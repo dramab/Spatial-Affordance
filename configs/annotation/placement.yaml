@@ -1,0 +1,44 @@
+# 放置规划参数配置
+# 所有长度单位与数据集场景工作单位一致（如 cm）
+
+# 数据集适配器
+dataset:
+  type: "hope"                    # 数据集类型: hope / custom
+  root_dir: "/path/to/hope_video" # 数据根目录
+  mesh_dir: "/path/to/meshes/full" # mesh 目录（HOPE 需要）
+  frame_step: 60                  # 帧采样步长
+
+# 占据栅格
+occupancy:
+  voxel_size: 1.0                 # 体素边长
+  pixel_stride: 4                 # 深度图采样步长
+  grid_padding: 10.0              # 栅格边界 padding
+
+# 放置规划
+placement:
+  safety_margin: 0.5              # 碰撞安全边距
+  yaw_steps: 24                   # yaw 旋转离散步数 (360/24=15°)
+  min_surface_area: 50.0          # 最小支撑面面积
+  min_support_ratio: 1.0          # 最小支撑比
+  occlusion_threshold: 0.3        # 遮挡阈值
+  world_up: [0.0, 0.0, 1.0]      # 世界坐标系上方向
+
+# 聚类
+clustering:
+  dbscan_eps: 5.0                 # DBSCAN 聚类半径
+  dbscan_min_samples: 1           # DBSCAN 最小样本数
+
+# 可视化
+visualization:
+  vis_margin_px: 30               # 可见性检查像素边距
+  save_vis: true                  # 是否保存可视化
+  save_ply: true                  # 是否保存 PLY 点云
+
+# 计算
+compute:
+  use_gpu: false                  # 是否使用 CuPy GPU 加速
+  stability_chunk_size: 2000      # 稳定性过滤每批大小
+
+# 输出
+output:
+  dir: "outputs/placement"        # 输出目录
