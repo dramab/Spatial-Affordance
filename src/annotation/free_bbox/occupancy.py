@@ -20,8 +20,31 @@ import numpy as np
 FREE, OCCUPIED, UNKNOWN = 0, 1, 2
 
 
+def _sample_depth_pixels(depth, stride):
+    """按 stride 采样有效深度像素。"""
+    h, w = depth.shape
+    u_arr = np.arange(0, w, stride)
+    v_arr = np.arange(0, h, stride)
+    uu, vv = np.meshgrid(u_arr, v_arr)
+    uu, vv = uu.ravel(), vv.ravel()
+
+    d = depth[vv, uu]
+    mask = d > 0
+    return uu[mask], vv[mask], d[mask]
+
+
+def _depth_samples_to_world(uu, vv, d, fx, fy, cx, cy, R_c2w, cam_origin):
+    """将采样后的深度像素反投影到世界坐标系。"""
+    pts_cam = np.stack([
+        (uu - cx) / fx * d,
+        (vv - cy) / fy * d,
+        d
+    ], axis=1)
+    return (R_c2w @ pts_cam.T).T + cam_origin
+
+
 def depth_to_pointcloud(depth, rgb, fx, fy, cx, cy,
-                        R_c2w, cam_origin, stride=4):
+                        R_c2w, cam_origin, stride=2):
     """
     深度图反投影为世界坐标系 3D 彩色点云。
 
@@ -36,32 +59,17 @@ def depth_to_pointcloud(depth, rgb, fx, fy, cx, cy,
         pts_world: (N, 3) 世界坐标点云
         colors: (N, 3) uint8 颜色
     """
-    h, w = depth.shape
-    u_arr = np.arange(0, w, stride)
-    v_arr = np.arange(0, h, stride)
-    uu, vv = np.meshgrid(u_arr, v_arr)
-    uu, vv = uu.ravel(), vv.ravel()
-
-    d = depth[vv, uu]
-    mask = d > 0
-    uu, vv, d = uu[mask], vv[mask], d[mask]
-
-    # 针孔模型反投影到相机坐标系
-    pts_cam = np.stack([
-        (uu - cx) / fx * d,
-        (vv - cy) / fy * d,
-        d
-    ], axis=1)  # (N, 3)
-
-    # camera → world
-    pts_world = (R_c2w @ pts_cam.T).T + cam_origin  # (N, 3)
+    uu, vv, d = _sample_depth_pixels(depth, stride)
+    pts_world = _depth_samples_to_world(
+        uu, vv, d, fx, fy, cx, cy, R_c2w, cam_origin)
     colors = rgb[vv, uu].astype(np.uint8)            # (N, 3)
     return pts_world, colors
 
 
 def build_occupancy_grid(depth, fx, fy, cx, cy,
                          R_c2w, cam_origin,
-                         voxel_size=1.0, stride=4, padding=10.0):
+                         voxel_size=1.0, stride=4, padding=10.0,
+                         surface_points=None):
     """
     通过 ray-casting 构建 3D 占据栅格。
 
@@ -82,31 +90,22 @@ def build_occupancy_grid(depth, fx, fy, cx, cy,
         voxel_size: 体素边长（场景单位）
         stride: 深度图采样步长
         padding: 栅格边界 padding（场景单位）
+        surface_points: (N, 3) 预计算的世界坐标表面点（可选）
     输出:
         grid: (Gx, Gy, Gz) uint8 占据栅格
         grid_min: (3,) 栅格最小角世界坐标
         voxel_size: float 体素边长
     """
-    h, w = depth.shape
     step = voxel_size * 0.5  # 亚体素步长
 
-    # 采样像素网格
-    u_arr = np.arange(0, w, stride)
-    v_arr = np.arange(0, h, stride)
-    uu, vv = np.meshgrid(u_arr, v_arr)
-    uu, vv = uu.ravel(), vv.ravel()
-
-    d = depth[vv, uu]
-    mask = d > 0
-    uu, vv, d = uu[mask], vv[mask], d[mask]
-
-    # 表面点（世界坐标）
-    pts_cam = np.stack([
-        (uu - cx) / fx * d,
-        (vv - cy) / fy * d,
-        d
-    ], axis=1)
-    surface = (R_c2w @ pts_cam.T).T + cam_origin
+    if surface_points is None:
+        uu, vv, d = _sample_depth_pixels(depth, stride)
+        surface = _depth_samples_to_world(
+            uu, vv, d, fx, fy, cx, cy, R_c2w, cam_origin)
+    else:
+        surface = np.asarray(surface_points, dtype=np.float64)
+        if surface.ndim != 2 or surface.shape[1] != 3:
+            raise ValueError("surface_points must have shape (N, 3)")
 
     # 栅格边界
     all_pts = np.vstack([surface, cam_origin.reshape(1, 3)])

@@ -97,7 +97,8 @@ class PlacementPipeline:
             camera.fx, camera.fy, camera.cx, camera.cy,
             R_c2w, cam_origin,
             voxel_size=cfg.voxel_size, stride=cfg.pixel_stride,
-            padding=cfg.grid_padding)
+            padding=cfg.grid_padding,
+            surface_points=pts_world)
 
         vp = make_voxel_params(grid_min, vs)
 
