@@ -38,14 +38,13 @@ RGBD 图像 + 物体标注
     ▼
 [Step 4] 逐物体处理：
     ├── 可见性预检查（8 角点是否在图像内）
-    ├── 移除目标物体体素（模拟"拿走"）
-    ├── 支撑面检测（最大水平平面）
+    ├── 目标物体体素化（仅用于结果对齐与可视化）
+    ├── 支撑面检测（在完整场景上检测最大水平平面）
     ├── FFT 碰撞搜索（X, Y, θ 配置空间）
     ├── 稳定性过滤（支撑比 + 质心投影）
     ├── 可见性过滤（放置后 8 角点仍在图像内）
     ├── 遮挡过滤（Z-buffer 比较）
-    ├── DBSCAN 聚类（世界 XY 空间）
-    └── 恢复目标物体体素
+    └── DBSCAN 聚类（世界 XY 空间）
     │
     ▼
 [Step 5] 输出 PlacementResult（每物体若干聚类代表）
@@ -64,6 +63,7 @@ RGBD 图像 + 物体标注
 
 - 安全边距 `safety_margin`：在碰撞检测前对障碍物做 XY 平面膨胀
 - 输出：所有 (x_voxel, y_voxel, yaw_idx) 三元组候选
+- 当前实现保留目标物体原始占据，因此候选位置不会与物体当前所在位置重合
 
 ### 1.5 稳定性过滤
 
@@ -97,7 +97,7 @@ src/
 │   │   ├── datatypes.py        # 数据类定义（SceneData, CameraParams, ObjectInfo, PlacementConfig, PlacementResult）
 │   │   ├── occupancy.py        # 深度图 → 点云 → 占据栅格
 │   │   ├── voxel_utils.py      # 体素坐标转换工具
-│   │   ├── grid_ops.py         # 栅格操作（体素化、移除/恢复、膨胀）
+│   │   ├── grid_ops.py         # 栅格操作（体素化、场景占据标记、膨胀）
 │   │   ├── surface.py          # 支撑面检测
 │   │   ├── collision.py        # FFT 碰撞检测
 │   │   ├── filters.py          # 稳定性/可见性/遮挡过滤
@@ -130,7 +130,7 @@ configs/
 | `coord_utils.py` | `transform_points`, `project_world`, `rotation_z_3x3` | 坐标变换、投影 |
 | `occupancy.py` | `depth_to_pointcloud`, `build_occupancy_grid` | RGBD → 占据栅格 |
 | `voxel_utils.py` | `make_voxel_params`, `world_to_voxel`, `voxel_to_world` | 体素坐标系管理 |
-| `grid_ops.py` | `voxelize_obb`, `prepare_grid_base`, `grid_remove_object` | 栅格操作 |
+| `grid_ops.py` | `voxelize_obb`, `prepare_grid_base`, `dilate_obstacles_xy` | 栅格操作 |
 | `surface.py` | `detect_support_surfaces` | 支撑面检测 |
 | `collision.py` | `find_table_placements` | FFT 碰撞搜索 |
 | `filters.py` | `filter_stable/visible/occluded_placements` | 三级过滤 |
@@ -166,9 +166,6 @@ DatasetAdapter.load_scene()
                     ├─→ voxelize_obb(bbox3d, pose_world, vp)
                     │       └─→ target_vox (M,3)
                     │
-                    ├─→ grid_remove_object(grid_base, target_vox)
-                    │       └─→ (valid_vox, saved)
-                    │
                     ├─→ detect_support_surfaces(grid_base, vp)
                     │       └─→ table_z (int), surface_mask (Gx,Gy) bool
                     │
@@ -185,10 +182,8 @@ DatasetAdapter.load_scene()
                     │   filter_occluded_placements(candidates, ..., depth_buf)
                     │       └─→ candidates (I,3)
                     │
-                    ├─→ cluster_placements(candidates, grid_base, yaw_data, table_z, vp)
-                    │       └─→ reps (C,3), cluster_infos [list of dict]
-                    │
-                    └─→ grid_restore_object(grid_base, valid_vox, saved)
+                    └─→ cluster_placements(candidates, grid_base, yaw_data, table_z, vp)
+                            └─→ reps (C,3), cluster_infos [list of dict]
 
     最终输出: {obj_id: PlacementResult}
 ```
@@ -208,11 +203,13 @@ DatasetAdapter.load_scene()
 **`cluster_infos` list**（每个元素为一个聚类）：
 ```python
 {
+    "cluster_id": int,                 # 聚类编号
+    "size": int,                       # 聚类内候选数量
     "anchor_voxel": [x, y, yaw_idx],   # 体素坐标 + yaw 索引
     "anchor_world": [wx, wy, wz],      # 世界坐标
-    "yaw_rad": float,                  # yaw 角度（弧度）
+    "yaw_index": int,                  # yaw 离散索引
+    "yaw_degrees": float,              # yaw 角度（度）
     "free_score": float,               # 自由空间得分（越高越好）
-    "cluster_size": int,               # 聚类内候选数量
 }
 ```
 
@@ -355,11 +352,13 @@ output_dir/
       "original_aabb_world": [x1, y1, z1, x2, y2, z2],
       "clusters": [
         {
+          "cluster_id": 0,
+          "size": 3,
           "anchor_voxel": [vx, vy, yaw_idx],
           "anchor_world": [wx, wy, wz],
-          "yaw_rad": 0.2618,
-          "free_score": 142.0,
-          "cluster_size": 3
+          "yaw_index": 1,
+          "yaw_degrees": 15.0,
+          "free_score": 142.0
         }
       ]
     }
@@ -376,8 +375,9 @@ output_dir/
 | `num_visible` | 可见性过滤后剩余数 |
 | `num_unoccluded` | 遮挡过滤后剩余数 |
 | `clusters` | DBSCAN 聚类结果，每个元素为一个聚类的代表放置位置 |
-| `anchor_world` | 放置位置的世界坐标（物体 bbox 最小角的世界坐标） |
-| `yaw_rad` | 放置时物体绕 Z 轴的旋转角度（弧度） |
+| `anchor_world` | 放置锚点的世界坐标（对应候选 `anchor_voxel` 的体素中心） |
+| `yaw_index` | 放置时使用的 yaw 离散索引 |
+| `yaw_degrees` | 放置时物体绕 Z 轴的旋转角度（度） |
 | `free_score` | 该位置周围自由空间体素数，越大表示周围越空旷 |
 | `original_aabb_world` | 物体原始位置的世界坐标 AABB（用于对比） |
 
@@ -419,8 +419,8 @@ vp = meta["voxel_params"]
 obj = result["objects"]["obj_0"]
 for cluster in obj["clusters"]:
     anchor_world = np.array(cluster["anchor_world"])  # 世界坐标
-    yaw = cluster["yaw_rad"]                          # 旋转角度
-    print(f"放置位置: {anchor_world}, yaw: {yaw:.3f} rad")
+    yaw_deg = cluster["yaw_degrees"]                 # 旋转角度（度）
+    print(f"放置位置: {anchor_world}, yaw: {yaw_deg:.1f} deg")
 ```
 
 ---

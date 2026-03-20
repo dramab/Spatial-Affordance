@@ -199,9 +199,7 @@ def _compute_placed_transform_vis(T_obj2world, bbox3d, anchor_xy,
 
 def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
                        K, E_w2c, vp, cam_origin,
-                       cluster_reps, cluster_infos,
-                       obj_voxels, grid, out_path,
-                       yaw_data, landing_z):
+                       cluster_reps, grid, out_path, yaw_data, landing_z):
     """
     双面板暗色主题放置可视化。
 
@@ -218,8 +216,6 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
         vp: dict 体素参数
         cam_origin: (3,) 相机位置
         cluster_reps: (K, 3) int 聚类代表
-        cluster_infos: list[dict] 聚类信息
-        obj_voxels: (M, 3) int 物体体素索引
         grid: (Gx, Gy, Gz) uint8 栅格
         out_path: str 输出路径
         yaw_data: dict yaw 旋转数据

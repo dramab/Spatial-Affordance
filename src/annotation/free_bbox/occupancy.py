@@ -68,7 +68,7 @@ def depth_to_pointcloud(depth, rgb, fx, fy, cx, cy,
 
 def build_occupancy_grid(depth, fx, fy, cx, cy,
                          R_c2w, cam_origin,
-                         voxel_size=1.0, stride=4, padding=10.0,
+                         voxel_size=1.0, stride=2, padding=10.0,
                          surface_points=None):
     """
     通过 ray-casting 构建 3D 占据栅格。

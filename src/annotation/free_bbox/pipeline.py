@@ -25,9 +25,9 @@ from src.annotation.free_bbox.datatypes import (
 from src.annotation.free_bbox.occupancy import (
     depth_to_pointcloud, build_occupancy_grid, FREE, OCCUPIED, UNKNOWN,
 )
-from src.annotation.free_bbox.voxel_utils import make_voxel_params, voxel_to_world
+from src.annotation.free_bbox.voxel_utils import make_voxel_params
 from src.annotation.free_bbox.grid_ops import (
-    voxelize_obb, prepare_grid_base, grid_remove_object, grid_restore_object,
+    voxelize_obb, prepare_grid_base,
 )
 from src.annotation.free_bbox.surface import detect_support_surfaces
 from src.annotation.free_bbox.collision import find_table_placements
@@ -143,7 +143,7 @@ class PlacementPipeline:
                     placements=[], num_raw_candidates=0)
                 continue
 
-            # 目标物体体素化 + 移除
+            # 目标物体体素化（仅用于结果对齐与可视化）
             target_vox = voxelize_obb(
                 obj.bbox3d_canonical, obj.pose_world, vp,
                 np.array(grid_base.shape))
@@ -155,101 +155,95 @@ class PlacementPipeline:
                     placements=[], num_raw_candidates=0)
                 continue
 
-            target_vox, saved = grid_remove_object(grid_base, target_vox)
+            # 在完整场景上检测支撑面与候选空位，原始位置保持占据
+            table_z, surface_mask = detect_support_surfaces(
+                grid_base, vp, min_area=cfg.min_surface_area)
+            if table_z is None:
+                print(f"    [SKIP] {name} no support surface")
+                all_results[obj.obj_id] = PlacementResult(
+                    obj_id=obj.obj_id, class_name=name,
+                    original_aabb_world=np.zeros(6),
+                    placements=[], num_raw_candidates=0)
+                continue
 
-            try:
-                # 每个物体移除后单独检测支撑面（与原始代码一致）
-                table_z, surface_mask = detect_support_surfaces(
-                    grid_base, vp, min_area=cfg.min_surface_area)
-                if table_z is None:
-                    print(f"    [SKIP] {name} no support surface")
-                    all_results[obj.obj_id] = PlacementResult(
-                        obj_id=obj.obj_id, class_name=name,
-                        original_aabb_world=np.zeros(6),
-                        placements=[], num_raw_candidates=0)
-                    continue
+            # FFT 碰撞搜索
+            candidates, meta, yaw_data = find_table_placements(
+                grid_base, obj.bbox3d_canonical, obj.pose_world, vp,
+                table_z, surface_mask,
+                safety_margin=cfg.safety_margin,
+                yaw_steps=cfg.yaw_steps,
+                use_gpu=self.use_gpu)
+            n_raw = meta["valid_raw"]
+            print(f"    Raw candidates: {n_raw}")
 
-                # FFT 碰撞搜索
-                candidates, meta, yaw_data = find_table_placements(
-                    grid_base, obj.bbox3d_canonical, obj.pose_world, vp,
-                    table_z, surface_mask,
-                    safety_margin=cfg.safety_margin,
-                    yaw_steps=cfg.yaw_steps,
-                    use_gpu=self.use_gpu)
-                n_raw = meta["valid_raw"]
-                print(f"    Raw candidates: {n_raw}")
+            # 稳定性过滤
+            candidates = filter_stable_placements(
+                candidates, yaw_data, surface_mask,
+                min_support_ratio=cfg.min_support_ratio,
+                chunk_size=cfg.stability_chunk_size)
+            n_stable = len(candidates)
+            print(f"    After stability: {n_stable}")
 
-                # 稳定性过滤
-                candidates = filter_stable_placements(
-                    candidates, yaw_data, surface_mask,
-                    min_support_ratio=cfg.min_support_ratio,
-                    chunk_size=cfg.stability_chunk_size)
-                n_stable = len(candidates)
-                print(f"    After stability: {n_stable}")
+            # 可见性过滤
+            candidates = filter_visible_placements(
+                candidates, table_z + 1,
+                obj.bbox3d_canonical, obj.pose_world,
+                E_w2c, K, camera.img_w, camera.img_h,
+                vp, yaw_data, margin_px=cfg.vis_margin_px)
+            n_vis = len(candidates)
+            print(f"    After visibility: {n_vis}")
 
-                # 可见性过滤
-                candidates = filter_visible_placements(
-                    candidates, table_z + 1,
-                    obj.bbox3d_canonical, obj.pose_world,
-                    E_w2c, K, camera.img_w, camera.img_h,
-                    vp, yaw_data, margin_px=cfg.vis_margin_px)
-                n_vis = len(candidates)
-                print(f"    After visibility: {n_vis}")
+            # 遮挡过滤
+            depth_buf = build_depth_buffer(
+                grid_base, vp, K, E_w2c,
+                camera.img_w, camera.img_h)
+            candidates = filter_occluded_placements(
+                candidates, table_z + 1,
+                obj.bbox3d_canonical, obj.pose_world,
+                depth_buf, K, E_w2c, vp, yaw_data,
+                camera.img_w, camera.img_h,
+                occlusion_threshold=cfg.occlusion_threshold)
+            n_occ = len(candidates)
+            print(f"    After occlusion: {n_occ}")
 
-                # 遮挡过滤
-                depth_buf = build_depth_buffer(
-                    grid_base, vp, K, E_w2c,
-                    camera.img_w, camera.img_h)
-                candidates = filter_occluded_placements(
-                    candidates, table_z + 1,
-                    obj.bbox3d_canonical, obj.pose_world,
-                    depth_buf, K, E_w2c, vp, yaw_data,
-                    camera.img_w, camera.img_h,
-                    occlusion_threshold=cfg.occlusion_threshold)
-                n_occ = len(candidates)
-                print(f"    After occlusion: {n_occ}")
+            # DBSCAN 聚类
+            reps, c_infos = cluster_placements(
+                candidates, grid_base, yaw_data,
+                table_z + 1, vp,
+                eps=cfg.dbscan_eps,
+                min_samples=cfg.dbscan_min_samples)
+            print(f"    Clusters: {len(reps)}")
 
-                # DBSCAN 聚类
-                reps, c_infos = cluster_placements(
-                    candidates, grid_base, yaw_data,
-                    table_z + 1, vp,
-                    eps=cfg.dbscan_eps,
-                    min_samples=cfg.dbscan_min_samples)
-                print(f"    Clusters: {len(reps)}")
+            # 构建结果
+            from src.annotation.free_bbox.grid_ops import _get_bbox_corners
+            corners_obj = _get_bbox_corners(obj.bbox3d_canonical)
+            orig_world = transform_points(corners_obj, obj.pose_world)
+            orig_aabb = np.concatenate([orig_world.min(0), orig_world.max(0)])
 
-                # 构建结果
-                from src.annotation.free_bbox.grid_ops import _get_bbox_corners
-                corners_obj = _get_bbox_corners(obj.bbox3d_canonical)
-                orig_world = transform_points(corners_obj, obj.pose_world)
-                orig_aabb = np.concatenate([orig_world.min(0), orig_world.max(0)])
+            result = PlacementResult(
+                obj_id=obj.obj_id,
+                class_name=name,
+                original_aabb_world=orig_aabb,
+                placements=c_infos,
+                num_raw_candidates=n_raw,
+                num_after_stability=n_stable,
+                num_after_visibility=n_vis,
+                num_after_occlusion=n_occ,
+            )
+            all_results[obj.obj_id] = result
 
-                result = PlacementResult(
-                    obj_id=obj.obj_id,
-                    class_name=name,
-                    original_aabb_world=orig_aabb,
-                    placements=c_infos,
-                    num_raw_candidates=n_raw,
-                    num_after_stability=n_stable,
-                    num_after_visibility=n_vis,
-                    num_after_occlusion=n_occ,
-                )
-                all_results[obj.obj_id] = result
-
-                # 可视化
-                if output_dir and save_vis and len(reps) > 0:
-                    from src.annotation.free_bbox.visualize import (
-                        save_placement_vis)
-                    vis_dir = os.path.join(output_dir, f"placement_{name}")
-                    os.makedirs(vis_dir, exist_ok=True)
-                    vis_path = os.path.join(vis_dir, "placement_vis.png")
-                    save_placement_vis(
-                        scene.rgb, name, obj.bbox3d_canonical,
-                        obj.pose_world, K, E_w2c, vp, cam_origin,
-                        reps, c_infos, target_vox, grid_base,
-                        vis_path, yaw_data, table_z + 1)
-
-            finally:
-                grid_restore_object(grid_base, target_vox, saved)
+            # 可视化
+            if output_dir and save_vis and len(reps) > 0:
+                from src.annotation.free_bbox.visualize import (
+                    save_placement_vis)
+                vis_dir = os.path.join(output_dir, f"placement_{name}")
+                os.makedirs(vis_dir, exist_ok=True)
+                vis_path = os.path.join(vis_dir, "placement_vis.png")
+                save_placement_vis(
+                    scene.rgb, name, obj.bbox3d_canonical,
+                    obj.pose_world, K, E_w2c, vp, cam_origin,
+                    reps, grid_base,
+                    vis_path, yaw_data, table_z + 1)
 
         # ── Step 6: 保存结果 ──────────────────────────────────────────────
         if output_dir:

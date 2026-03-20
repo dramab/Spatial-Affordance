@@ -1,19 +1,19 @@
 """
 src/annotation/free_bbox/grid_ops.py
 -------------------------------------
-占据栅格操作：物体体素化填充、移除/恢复、障碍物膨胀。
+占据栅格操作：物体体素化填充与障碍物膨胀。
 
 用于放置规划中的栅格准备，将物体 OBB 标记为 OCCUPIED，
-模拟移除目标物体（设为 FREE），以及安全边距膨胀。
+并为碰撞搜索构建安全边距膨胀掩码。
 
 用法:
-    from src.annotation.free_bbox.grid_ops import prepare_grid_base, prepare_grid
+    from src.annotation.free_bbox.grid_ops import prepare_grid_base, voxelize_obb
 """
 
 import numpy as np
 from scipy.ndimage import binary_dilation, generate_binary_structure
 
-from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
+from src.annotation.free_bbox.occupancy import OCCUPIED, UNKNOWN
 
 
 def voxelize_obb(bbox3d, T_obj2world, vp, grid_shape):
@@ -87,67 +87,6 @@ def prepare_grid_base(grid, objects, vp):
         if len(voxels) > 0:
             grid_base[voxels[:, 0], voxels[:, 1], voxels[:, 2]] = OCCUPIED
     return grid_base
-
-
-def prepare_grid(grid_base, target_voxels):
-    """
-    为目标物体准备工作栅格：将目标物体体素设为 FREE（模拟移除）。
-
-    输入:
-        grid_base: (Gx, Gy, Gz) uint8 所有物体已标记的栅格
-        target_voxels: (M, 3) int 目标物体的体素索引
-    输出:
-        grid_work: (Gx, Gy, Gz) uint8 工作栅格副本
-    """
-    grid_work = grid_base.copy()
-    if len(target_voxels) > 0:
-        grid_work[target_voxels[:, 0],
-                  target_voxels[:, 1],
-                  target_voxels[:, 2]] = FREE
-    return grid_work
-
-
-def grid_remove_object(grid, target_voxels):
-    """
-    原地移除物体体素（设为 FREE），返回有效体素和保存的原始值用于恢复。
-
-    会做边界检查，过滤掉超出栅格范围的体素。
-
-    输入:
-        grid: (Gx, Gy, Gz) uint8 栅格（原地修改）
-        target_voxels: (M, 3) int 目标物体体素索引
-    输出:
-        valid_voxels: (K, 3) int 边界内的有效体素索引
-        saved: (K,) uint8 被覆盖的原始体素值
-    """
-    if len(target_voxels) == 0:
-        return target_voxels, np.array([], dtype=grid.dtype)
-    gs = grid.shape
-    m = ((target_voxels[:, 0] >= 0) & (target_voxels[:, 0] < gs[0]) &
-         (target_voxels[:, 1] >= 0) & (target_voxels[:, 1] < gs[1]) &
-         (target_voxels[:, 2] >= 0) & (target_voxels[:, 2] < gs[2]))
-    v = target_voxels[m]
-    if len(v) == 0:
-        return v, np.array([], dtype=grid.dtype)
-    saved = grid[v[:, 0], v[:, 1], v[:, 2]].copy()
-    grid[v[:, 0], v[:, 1], v[:, 2]] = FREE
-    return v, saved
-
-
-def grid_restore_object(grid, target_voxels, saved):
-    """
-    原地恢复物体体素到保存的原始值。
-
-    输入:
-        grid: (Gx, Gy, Gz) uint8 栅格（原地修改）
-        target_voxels: (M, 3) int 目标物体体素索引
-        saved: (M,) uint8 保存的原始值
-    """
-    if len(target_voxels) == 0:
-        return
-    grid[target_voxels[:, 0],
-         target_voxels[:, 1],
-         target_voxels[:, 2]] = saved
 
 
 def dilate_obstacles_xy(grid, margin_voxels):
