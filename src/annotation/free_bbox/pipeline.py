@@ -157,7 +157,9 @@ class PlacementPipeline:
 
             # 在完整场景上检测支撑面与候选空位，原始位置保持占据
             table_z, surface_mask = detect_support_surfaces(
-                grid_base, vp, min_area=cfg.min_surface_area)
+                grid_base, vp,
+                min_area=cfg.min_surface_area,
+                points_world=pts_world)
             if table_z is None:
                 print(f"    [SKIP] {name} no support surface")
                 all_results[obj.obj_id] = PlacementResult(

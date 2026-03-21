@@ -39,7 +39,7 @@ RGBD 图像 + 物体标注
 [Step 4] 逐物体处理：
     ├── 可见性预检查（8 角点是否在图像内）
     ├── 目标物体体素化（仅用于结果对齐与可视化）
-    ├── 支撑面检测（在完整场景上检测最大水平平面）
+    ├── 支撑面检测（优先在点云中用 RANSAC 检测水平支撑面，失败时回退到栅格搜索）
     ├── FFT 碰撞搜索（X, Y, θ 配置空间）
     ├── 稳定性过滤（支撑比 + 质心投影）
     ├── 可见性过滤（放置后 8 角点仍在图像内）
@@ -57,7 +57,20 @@ RGBD 图像 + 物体标注
 - 体素坐标系：以点云包围盒为范围，加 `grid_padding` 边界，体素边长 `voxel_size`（场景单位，如 cm）
 - 采样步长 `pixel_stride`：每隔 N 个像素取一个深度点，平衡精度与速度
 
-### 1.4 FFT 碰撞检测
+### 1.4 支撑面检测
+
+当前 `surface.py` 的实现会优先使用 Step 1 生成的场景点云 `pts_world` 检测支撑面：
+
+1. 在点云中随机采样 3 点，用 RANSAC 拟合平面
+2. 仅保留法向量接近世界 `+Z` 方向的近似水平平面
+3. 将平面内点投影回体素网格 XY 平面，做形态学闭运算与连通域筛选
+4. 返回面积最大的支撑区域及其所在 `z` 层
+
+若点云拟合失败，则自动退回到旧的占据栅格逐层搜索方案。当前接口仍返回单个 `(table_z, surface_mask)`，因此更适合桌面/台面这类“主支撑面”场景；若场景中同时存在地面、桌面、柜顶等多个候选支撑面，它们会共同竞争当前唯一的最佳支撑面。
+
+注意：当前支撑面检测默认世界坐标的竖直方向与 `+Z` 对齐。
+
+### 1.5 FFT 碰撞检测
 
 对每个 yaw 角度（共 `yaw_steps` 个离散角度），将旋转后的物体体素投影到 XY 平面得到 2D footprint，与支撑面上方的障碍物 2D 投影做**互相关（FFT 卷积）**，互相关为 0 的位置即无碰撞。
 
@@ -65,21 +78,21 @@ RGBD 图像 + 物体标注
 - 输出：所有 (x_voxel, y_voxel, yaw_idx) 三元组候选
 - 当前实现保留目标物体原始占据，因此候选位置不会与物体当前所在位置重合
 
-### 1.5 稳定性过滤
+### 1.6 稳定性过滤
 
 对每个候选位置，检查：
 1. 物体底面与支撑面的重叠比例 ≥ `min_support_ratio`
 2. 物体质心在 XY 平面的投影落在支撑区域内（防止悬空倾倒）
 
-### 1.6 可见性过滤
+### 1.7 可见性过滤
 
 将放置后物体的 8 个 OBB 角点投影到图像平面，要求所有角点均在图像范围内（含 `vis_margin_px` 像素边距）。
 
-### 1.7 遮挡过滤
+### 1.8 遮挡过滤
 
 构建场景深度缓冲（Z-buffer）：对每个像素取所有 OCCUPIED 体素中最近的深度值。将放置后物体角点投影到图像，若投影深度远大于 Z-buffer 值（被遮挡比例 > `occlusion_threshold`），则过滤掉。
 
-### 1.8 DBSCAN 聚类
+### 1.9 DBSCAN 聚类
 
 将通过所有过滤的候选点在世界 XY 空间做 DBSCAN 聚类（半径 `dbscan_eps`），每个聚类选取**自由空间得分最高**的候选作为代表，减少输出冗余。
 
@@ -131,7 +144,7 @@ configs/
 | `occupancy.py` | `depth_to_pointcloud`, `build_occupancy_grid` | RGBD → 占据栅格 |
 | `voxel_utils.py` | `make_voxel_params`, `world_to_voxel`, `voxel_to_world` | 体素坐标系管理 |
 | `grid_ops.py` | `voxelize_obb`, `prepare_grid_base`, `dilate_obstacles_xy` | 栅格操作 |
-| `surface.py` | `detect_support_surfaces` | 支撑面检测 |
+| `surface.py` | `detect_support_surfaces` | 支撑面检测（点云 RANSAC 优先，栅格搜索回退） |
 | `collision.py` | `find_table_placements` | FFT 碰撞搜索 |
 | `filters.py` | `filter_stable/visible/occluded_placements` | 三级过滤 |
 | `cluster.py` | `cluster_placements` | DBSCAN 聚类 |
@@ -166,7 +179,7 @@ DatasetAdapter.load_scene()
                     ├─→ voxelize_obb(bbox3d, pose_world, vp)
                     │       └─→ target_vox (M,3)
                     │
-                    ├─→ detect_support_surfaces(grid_base, vp)
+                    ├─→ detect_support_surfaces(grid_base, vp, points_world=pts_world)
                     │       └─→ table_z (int), surface_mask (Gx,Gy) bool
                     │
                     ├─→ find_table_placements(grid_base, bbox3d, pose_world, vp, table_z, surface_mask)
@@ -309,7 +322,7 @@ elif ds_type == "my_dataset":
 | `voxel_size` | 体素边长（场景单位） | 场景尺度，通常为物体最小尺寸的 1/5~1/10 |
 | `grid_padding` | 栅格边界扩展 | 场景单位，确保物体放置区域不超出栅格 |
 | `safety_margin` | 碰撞安全边距 | 场景单位，通常为 0.5~2 个体素 |
-| `min_surface_area` | 最小支撑面面积 | 体素数量，过小会检测到噪声平面 |
+| `min_surface_area` | 最小支撑面面积 | 场景单位²，内部会按 `voxel_size` 换算为体素面积阈值；过小会检测到噪声平面 |
 | `pixel_stride` | 深度图采样步长 | 越小越精确但越慢，通常 2~8 |
 
 ---
@@ -456,7 +469,7 @@ occupancy:
 placement:
   safety_margin: 0.5      # 碰撞安全边距（体素数）
   yaw_steps: 24           # yaw 离散步数
-  min_surface_area: 50.0  # 最小支撑面面积（体素数）
+  min_surface_area: 50.0  # 最小支撑面面积（场景单位²）
   min_support_ratio: 1.0  # 最小支撑比
   world_up: [0, 0, 1]     # 世界坐标系上方向
 
