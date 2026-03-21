@@ -15,6 +15,7 @@ src/annotation/free_bbox/filters.py
 """
 
 import numpy as np
+from scipy.ndimage import binary_erosion
 
 from src.utils.coord_utils import transform_points, project_world
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners
@@ -22,36 +23,49 @@ from src.annotation.free_bbox.voxel_utils import voxel_to_world
 from src.annotation.free_bbox.occupancy import FREE, OCCUPIED
 
 
-def is_fully_visible(bbox3d, pose_cam, fx, fy, cx, cy, img_w, img_h):
+def is_fully_visible(bbox3d, pose_cam, fx, fy, cx, cy, img_w, img_h,
+                     depth_buffer=None, depth_margin=0.0):
     """
-    检查物体 OBB 的 8 个角点是否全部投影在图像范围内。
+    检查物体 OBB 是否完整落在图像中，且不被其他场景几何遮挡。
 
     输入:
         bbox3d: (6,) 物体 canonical AABB
         pose_cam: (4, 4) object→camera 变换矩阵
         fx, fy, cx, cy: 相机内参
         img_w, img_h: 图像宽高
+        depth_buffer: (img_h, img_w) float64 其他场景几何的深度缓冲
+        depth_margin: float 深度比较容差
     输出:
         bool 是否完全可见
     """
     corners_cam = transform_points(
         _get_bbox_corners(bbox3d), np.asarray(pose_cam, dtype=np.float64))
-    if np.any(corners_cam[:, 2] <= 0):
+    Z = corners_cam[:, 2]
+    if np.any(Z <= 0):
         return False
+
     uv = np.stack([
-        fx * corners_cam[:, 0] / corners_cam[:, 2] + cx,
-        fy * corners_cam[:, 1] / corners_cam[:, 2] + cy,
+        fx * corners_cam[:, 0] / Z + cx,
+        fy * corners_cam[:, 1] / Z + cy,
     ], axis=1)
-    return bool(np.all(uv[:, 0] >= 0) and np.all(uv[:, 0] < img_w) and
-                np.all(uv[:, 1] >= 0) and np.all(uv[:, 1] < img_h))
+
+    in_view = (np.all(uv[:, 0] >= 0) and np.all(uv[:, 0] < img_w) and
+               np.all(uv[:, 1] >= 0) and np.all(uv[:, 1] < img_h))
+    if not in_view or depth_buffer is None:
+        return bool(in_view)
+
+    u_int = np.round(uv[:, 0]).astype(int)
+    v_int = np.round(uv[:, 1]).astype(int)
+    buf_z = depth_buffer[v_int, u_int]
+    occluded = np.isfinite(buf_z) & (Z > buf_z + depth_margin)
+    return bool(not np.any(occluded))
 
 
 def filter_visible_placements(candidates, landing_z,
                                bbox3d, T_obj2world, E_w2c, K,
-                               img_w, img_h, vp, yaw_data,
-                               margin_px=30):
+                               img_w, img_h, vp, yaw_data):
     """
-    保留 OBB 投影在图像范围内的放置候选（向量化，按 yaw 角度批处理）。
+    保留 OBB 严格投影在图像范围内的放置候选（向量化，按 yaw 角度批处理）。
 
     输入:
         candidates: (N, 3) int [grid_x, grid_y, yaw_index]
@@ -63,7 +77,6 @@ def filter_visible_placements(candidates, landing_z,
         img_w, img_h: 图像宽高
         vp: dict 体素参数
         yaw_data: dict 来自 find_table_placements 的 yaw 旋转数据
-        margin_px: int 像素边距容差
     输出:
         (M, 3) int 过滤后的候选
     """
@@ -105,9 +118,8 @@ def filter_visible_placements(candidates, landing_z,
         U = all_cam[:, :, 0] / safe_Z * fx + cx
         V = all_cam[:, :, 1] / safe_Z * fy + cy
 
-        m = margin_px
-        u_ok = np.all(U >= -m, axis=1) & np.all(U < img_w + m, axis=1)
-        v_ok = np.all(V >= -m, axis=1) & np.all(V < img_h + m, axis=1)
+        u_ok = np.all(U >= 0, axis=1) & np.all(U < img_w, axis=1)
+        v_ok = np.all(V >= 0, axis=1) & np.all(V < img_h, axis=1)
 
         keep[mask] = z_ok & u_ok & v_ok
 
@@ -116,9 +128,10 @@ def filter_visible_placements(candidates, landing_z,
 
 def filter_stable_placements(candidates, yaw_data, table_mask_2d,
                               min_support_ratio=1.0,
-                              chunk_size=2000):
+                              chunk_size=2000,
+                              edge_margin_voxels=1):
     """
-    保留底面足迹被支撑面充分支撑且质心投影在支撑面上的候选。
+    保留底面足迹被支撑面充分支撑且质心投影在安全支撑区域上的候选。
 
     输入:
         candidates: (N, 3) int [grid_x, grid_y, yaw_index]
@@ -126,6 +139,7 @@ def filter_stable_placements(candidates, yaw_data, table_mask_2d,
         table_mask_2d: (Gx, Gy) bool 支撑面掩码
         min_support_ratio: float 最小支撑比（0~1）
         chunk_size: int 每批处理的最大候选数
+        edge_margin_voxels: int 支撑面边缘安全内缩体素数
     输出:
         (M, 3) int 过滤后的候选
     """
@@ -133,6 +147,15 @@ def filter_stable_placements(candidates, yaw_data, table_mask_2d,
         return candidates
 
     Gx, Gy = table_mask_2d.shape
+    if edge_margin_voxels > 0:
+        support_mask_2d = binary_erosion(
+            table_mask_2d,
+            structure=np.ones((3, 3), dtype=bool),
+            iterations=int(edge_margin_voxels),
+            border_value=0)
+    else:
+        support_mask_2d = table_mask_2d
+
     footprints = yaw_data["footprints"]
     keep = np.zeros(len(candidates), dtype=bool)
 
@@ -163,7 +186,7 @@ def filter_stable_placements(candidates, yaw_data, table_mask_2d,
 
             fi_c = np.clip(fi, 0, Gx - 1)
             fj_c = np.clip(fj, 0, Gy - 1)
-            on_table = table_mask_2d[fi_c, fj_c] & in_bounds
+            on_table = support_mask_2d[fi_c, fj_c] & in_bounds
 
             ratio = on_table.sum(axis=1) / max(n_foot, 1)
 
@@ -174,8 +197,8 @@ def filter_stable_placements(candidates, yaw_data, table_mask_2d,
             com_j_int = np.round(com_j).astype(int)
             com_in = ((com_i_int >= 0) & (com_i_int < Gx) &
                       (com_j_int >= 0) & (com_j_int < Gy))
-            com_ok = com_in & table_mask_2d[np.clip(com_i_int, 0, Gx - 1),
-                                            np.clip(com_j_int, 0, Gy - 1)]
+            com_ok = com_in & support_mask_2d[np.clip(com_i_int, 0, Gx - 1),
+                                              np.clip(com_j_int, 0, Gy - 1)]
 
             batch_keep[c0:c1] = (ratio >= min_support_ratio) & com_ok
 

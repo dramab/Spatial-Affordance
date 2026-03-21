@@ -130,25 +130,33 @@ class PlacementPipeline:
             name = obj.class_name
             print(f"\n  Processing: {name}")
 
-            # 可见性预检查
-            pose_cam = E_w2c @ obj.pose_world
-            if not is_fully_visible(obj.bbox3d_canonical, pose_cam,
-                                    camera.fx, camera.fy,
-                                    camera.cx, camera.cy,
-                                    camera.img_w, camera.img_h):
-                print(f"    [SKIP] {name} not fully visible")
+            # 目标物体体素化（用于预检查时移除自遮挡，并复用到结果对齐）
+            target_vox = voxelize_obb(
+                obj.bbox3d_canonical, obj.pose_world, vp,
+                np.array(grid_base.shape))
+            if len(target_vox) == 0:
+                print(f"    [SKIP] {name} no voxels")
                 all_results[obj.obj_id] = PlacementResult(
                     obj_id=obj.obj_id, class_name=name,
                     original_aabb_world=np.zeros(6),
                     placements=[], num_raw_candidates=0)
                 continue
 
-            # 目标物体体素化（仅用于结果对齐与可视化）
-            target_vox = voxelize_obb(
-                obj.bbox3d_canonical, obj.pose_world, vp,
-                np.array(grid_base.shape))
-            if len(target_vox) == 0:
-                print(f"    [SKIP] {name} no voxels")
+            grid_other = grid_base.copy()
+            grid_other[target_vox[:, 0], target_vox[:, 1], target_vox[:, 2]] = FREE
+            depth_buf = build_depth_buffer(
+                grid_other, vp, K, E_w2c,
+                camera.img_w, camera.img_h)
+
+            # 可见性预检查：既要在图内，也不能被其他几何遮挡
+            pose_cam = E_w2c @ obj.pose_world
+            if not is_fully_visible(obj.bbox3d_canonical, pose_cam,
+                                    camera.fx, camera.fy,
+                                    camera.cx, camera.cy,
+                                    camera.img_w, camera.img_h,
+                                    depth_buffer=depth_buf,
+                                    depth_margin=vs):
+                print(f"    [SKIP] {name} not fully visible")
                 all_results[obj.obj_id] = PlacementResult(
                     obj_id=obj.obj_id, class_name=name,
                     original_aabb_world=np.zeros(6),
@@ -191,14 +199,11 @@ class PlacementPipeline:
                 candidates, table_z + 1,
                 obj.bbox3d_canonical, obj.pose_world,
                 E_w2c, K, camera.img_w, camera.img_h,
-                vp, yaw_data, margin_px=cfg.vis_margin_px)
+                vp, yaw_data)
             n_vis = len(candidates)
             print(f"    After visibility: {n_vis}")
 
             # 遮挡过滤
-            depth_buf = build_depth_buffer(
-                grid_base, vp, K, E_w2c,
-                camera.img_w, camera.img_h)
             candidates = filter_occluded_placements(
                 candidates, table_z + 1,
                 obj.bbox3d_canonical, obj.pose_world,
