@@ -82,7 +82,7 @@ def build_placement_config(cfg):
         min_surface_area=plc.get("min_surface_area", 50.0),
         min_support_ratio=plc.get("min_support_ratio", 1.0),
         occlusion_threshold=plc.get("occlusion_threshold", 0.3),
-        dbscan_eps=clu.get("dbscan_eps", 5.0),
+        dbscan_eps=clu.get("dbscan_eps"),
         dbscan_min_samples=clu.get("dbscan_min_samples", 1),
         world_up=tuple(world_up),
         vis_margin_px=vis.get("vis_margin_px", 30),

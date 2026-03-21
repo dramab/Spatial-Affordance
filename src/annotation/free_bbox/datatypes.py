@@ -111,7 +111,7 @@ class PlacementConfig:
         min_surface_area: 最小支撑面面积（单位²）
         min_support_ratio: 最小支撑比（0~1）
         occlusion_threshold: 遮挡阈值（OBB 角点被遮挡的比例上限）
-        dbscan_eps: DBSCAN 聚类半径
+        dbscan_eps: DBSCAN 聚类半径（None 表示按物体尺度自适应估计）
         dbscan_min_samples: DBSCAN 最小样本数
         world_up: 世界坐标系上方向 (3,)
         vis_margin_px: 可视化边距（像素）
@@ -124,7 +124,7 @@ class PlacementConfig:
     min_surface_area: float = 50.0
     min_support_ratio: float = 1.0
     occlusion_threshold: float = 0.3
-    dbscan_eps: float = 5.0
+    dbscan_eps: Optional[float] = None
     dbscan_min_samples: int = 1
     world_up: tuple = (0.0, 0.0, 1.0)
     vis_margin_px: int = 30

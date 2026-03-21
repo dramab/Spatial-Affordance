@@ -212,6 +212,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         "vmin_rot_abs": yaw_vmin_rot,
         "T_rotated":    yaw_T_rotated,
         "footprints":   yaw_footprints,
+        "original_yaw_index": 0,
     }
 
     meta = {

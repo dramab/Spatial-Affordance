@@ -25,7 +25,7 @@ placement:
 
 # 聚类
 clustering:
-  dbscan_eps: 5.0                 # DBSCAN 聚类半径
+  dbscan_eps: null                # null 表示按物体尺度自适应估计
   dbscan_min_samples: 1           # DBSCAN 最小样本数
 
 # 可视化
