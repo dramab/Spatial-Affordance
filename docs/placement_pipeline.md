@@ -64,9 +64,9 @@ RGBD 图像 + 物体标注
 1. 在点云中随机采样 3 点，用 RANSAC 拟合平面
 2. 仅保留法向量接近世界 `+Z` 方向的近似水平平面
 3. 将平面内点投影回体素网格 XY 平面，做形态学闭运算与连通域筛选
-4. 返回面积最大的支撑区域及其所在 `z` 层
+4. 若提供当前物体体素，则在多个候选支撑面中选择与该物体 `3D` 欧氏距离最近的那个候选
 
-若点云拟合失败，则自动退回到旧的占据栅格逐层搜索方案。当前接口仍返回单个 `(table_z, surface_mask)`，因此更适合桌面/台面这类“主支撑面”场景；若场景中同时存在地面、桌面、柜顶等多个候选支撑面，它们会共同竞争当前唯一的最佳支撑面。
+若点云拟合失败，则自动退回到占据栅格逐层搜索方案，并沿用相同的“最近支撑面”选择规则。接口仍返回单个 `(table_z, surface_mask)`，但它不再固定表示全局面积最大的平面，而是表示当前物体对应的最近支撑面。
 
 注意：当前支撑面检测默认世界坐标的竖直方向与 `+Z` 对齐。
 
@@ -179,7 +179,8 @@ DatasetAdapter.load_scene()
                     ├─→ voxelize_obb(bbox3d, pose_world, vp)
                     │       └─→ target_vox (M,3)
                     │
-                    ├─→ detect_support_surfaces(grid_base, vp, points_world=pts_world)
+                    ├─→ detect_support_surfaces(grid_other, vp, points_world=pts_world,
+                    │                          target_voxels=target_vox)
                     │       └─→ table_z (int), surface_mask (Gx,Gy) bool
                     │
                     ├─→ find_table_placements(grid_base, bbox3d, pose_world, vp, table_z, surface_mask)
