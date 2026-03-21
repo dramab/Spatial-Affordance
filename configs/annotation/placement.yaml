@@ -4,19 +4,19 @@
 # 数据集适配器
 dataset:
   type: "hope"                    # 数据集类型: hope / custom
-  root_dir: "/path/to/hope_video" # 数据根目录
-  mesh_dir: "/path/to/meshes/full" # mesh 目录（HOPE 需要）
+  root_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/hope_video" # 数据根目录
+  mesh_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/full" # mesh 目录（HOPE 需要）
   frame_step: 60                  # 帧采样步长
 
 # 占据栅格
 occupancy:
   voxel_size: 1.0                 # 体素边长
-  pixel_stride: 4                 # 深度图采样步长
+  pixel_stride: 2                 # 深度图采样步长
   grid_padding: 10.0              # 栅格边界 padding
 
 # 放置规划
 placement:
-  safety_margin: 0.5              # 碰撞安全边距
+  safety_margin: 1              # 碰撞安全边距
   yaw_steps: 24                   # yaw 旋转离散步数 (360/24=15°)
   min_surface_area: 50.0          # 最小支撑面面积
   min_support_ratio: 1.0          # 最小支撑比

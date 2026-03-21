@@ -20,18 +20,18 @@ from src.annotation.free_bbox.grid_ops import _get_bbox_corners
 from src.annotation.free_bbox.voxel_utils import voxel_to_world, world_to_voxel
 from src.utils.coord_utils import transform_points, project_world
 
-CLR_BG = "#1C1D31"
-CLR_PANEL = "#101223"
-CLR_TEXT = "#F3F5FF"
-CLR_MUTED = "#CCD2E6"
-CLR_GRID = "#FFFFFF"
-CLR_ORIG = "#FF8A1C"
-CLR_PLACE = "#2DE38A"
-CLR_CAM = "#FFE23F"
-CLR_ARROW = "#FFD65A"
-CLR_OCC = "#9FB2CC"
+CLR_BG = "#1A1A2E"
+CLR_PANEL = "#0D0D1A"
+CLR_TEXT = "#FFFFFF"
+CLR_MUTED = "#D8DEEF"
+CLR_GRID = "#444466"
+CLR_ORIG = "#FF6D00"
+CLR_PLACE = "#00E676"
+CLR_CAM = "#FFEB3B"
+CLR_ARROW = "#FFD54F"
+CLR_OCC = "#78909C"
 CLR_SURFACE = "#D7E2EE"
-CLR_FREE = "#2F9B63"
+CLR_FREE = "#4CAF50"
 
 BOX_EDGES = [
     (0, 1), (2, 3), (4, 5), (6, 7),
@@ -65,20 +65,50 @@ def _draw_bbox_3d(ax, corners_world, color, lw=1.5, label=None, alpha=1.0):
                 color=color, lw=lw, alpha=alpha, label=lbl)
 
 
+def _annotate_projected_center(ax, point_world, text, K, E_w2c,
+                               color, dx, dy):
+    """在 2D 投影图上标注一个世界坐标点。"""
+    uv, z = project_world(np.asarray(point_world, dtype=np.float64)[None, :],
+                          K, E_w2c)
+    if z[0] <= 0:
+        return
+    ax.annotate(
+        text,
+        xy=(uv[0, 0], uv[0, 1]),
+        xytext=(uv[0, 0] + dx, uv[0, 1] + dy),
+        color=color,
+        fontsize=9,
+        fontweight="bold",
+        arrowprops=dict(arrowstyle="->", color=color, lw=1.2),
+    )
+
+
+def _select_highlight_index(placed_world_list, orig_ctr):
+    """选择位移长度居中的代表性放置结果用于高亮展示。"""
+    if len(placed_world_list) == 1:
+        return 0
+
+    centers = np.array([corners.mean(axis=0) for corners in placed_world_list],
+                       dtype=np.float64)
+    disp_norms = np.linalg.norm(centers - orig_ctr[None, :], axis=1)
+    order = np.argsort(disp_norms)
+    return int(order[len(order) // 2])
+
+
 def _style_3d_axes(ax):
     """统一 3D 右面板的暗色主题样式。"""
     ax.set_facecolor(CLR_PANEL)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-        axis.pane.set_facecolor(mcolors.to_rgba(CLR_PANEL, 1.0))
-        axis.pane.set_edgecolor(mcolors.to_rgba("#56607F", 0.9))
-        axis._axinfo["grid"]["color"] = mcolors.to_rgba(CLR_GRID, 0.55)
-        axis._axinfo["grid"]["linewidth"] = 1.0
+        axis.pane.fill = False
+        axis.pane.set_edgecolor(mcolors.to_rgba("#333355", 0.95))
+        axis._axinfo["grid"]["color"] = mcolors.to_rgba(CLR_GRID, 0.35)
+        axis._axinfo["grid"]["linewidth"] = 0.8
         axis._axinfo["grid"]["linestyle"] = "-"
         try:
-            axis.line.set_color(mcolors.to_rgba(CLR_MUTED, 0.7))
+            axis.line.set_color(mcolors.to_rgba(CLR_MUTED, 0.6))
         except Exception:
             pass
-    ax.tick_params(colors=CLR_TEXT, labelsize=10, pad=2)
+    ax.tick_params(colors=CLR_TEXT, labelsize=8, pad=2)
     ax.grid(True)
 
 
@@ -212,6 +242,14 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
             T_obj2world, bbox3d, rep[:2], landing_z, yaw_data, yaw_idx, vp)
         placed_world_list.append(transform_points(corners_obj, T_placed))
 
+    highlight_idx = _select_highlight_index(placed_world_list, orig_ctr)
+    highlight_world = placed_world_list[highlight_idx]
+    highlight_ctr = highlight_world.mean(axis=0)
+    highlight_disp = highlight_ctr - orig_ctr
+    highlight_dist = float(np.linalg.norm(highlight_disp))
+    highlight_aabb = np.concatenate(
+        [highlight_world.min(axis=0), highlight_world.max(axis=0)])
+
     support_world = _surface_mask_to_world(surface_mask, support_z, vp)
     focus_points = [orig_world, *placed_world_list]
     view_min, view_max = _compute_view_limits(support_world, focus_points, vs)
@@ -219,7 +257,7 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
 
     occ_idx = _filter_voxel_indices_to_view(
         np.argwhere(grid == OCCUPIED), view_min, view_max, vp)
-    max_occ = 2600
+    max_occ = 6000
     if len(occ_idx) > max_occ:
         occ_idx = occ_idx[rng.choice(len(occ_idx), max_occ, replace=False)]
     occ_world_vis = voxel_to_world(occ_idx, vp) if len(occ_idx) else np.empty((0, 3), dtype=np.float64)
@@ -235,39 +273,56 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
     if len(support_world) > max_support:
         support_world = support_world[rng.choice(len(support_world), max_support, replace=False)]
 
-    fig = plt.figure(figsize=(18, 7.8))
+    fig = plt.figure(figsize=(18, 7.4))
     fig.patch.set_facecolor(CLR_BG)
 
-    ax_rgb = fig.add_axes([0.02, 0.05, 0.45, 0.89])
+    ax_rgb = fig.add_axes([0.02, 0.10, 0.47, 0.82])
     ax_rgb.imshow(rgb)
 
     _draw_bbox_2d(ax_rgb, orig_world, K, E_w2c,
-                  color=CLR_ORIG, lw=2.8,
+                  color=CLR_ORIG, lw=2.5,
                   label=f"Original: {obj_name}")
 
     for k, placed_world in enumerate(placed_world_list):
-        lbl = f"Placement #{k} (of {n_reps})" if k == 0 else None
+        if k == highlight_idx:
+            continue
         _draw_bbox_2d(ax_rgb, placed_world, K, E_w2c,
-                      color=CLR_PLACE, lw=2.4, label=lbl, alpha=0.92)
+                      color=CLR_PLACE, lw=1.8, alpha=0.55)
+
+    _draw_bbox_2d(ax_rgb, highlight_world, K, E_w2c,
+                  color=CLR_PLACE, lw=2.2,
+                  label=f"Placement #{highlight_idx} (of {n_reps})",
+                  alpha=0.98)
+
+    _annotate_projected_center(
+        ax_rgb, orig_ctr, obj_name, K, E_w2c,
+        CLR_ORIG, dx=20, dy=-25)
+    _annotate_projected_center(
+        ax_rgb, highlight_ctr, f"Placement\n#{highlight_idx}", K, E_w2c,
+        CLR_PLACE, dx=24, dy=28)
 
     ax_rgb.set_xlim(0, img_w)
     ax_rgb.set_ylim(img_h, 0)
+    ax_rgb.set_title(
+        "RGB Image - 3-D Bbox Projection\n"
+        "Orange = current position | Green = clustered placements",
+        color=CLR_TEXT, fontsize=11, pad=8)
     ax_rgb.axis("off")
-    ax_rgb.legend(loc="upper left", fontsize=8,
+    ax_rgb.legend(loc="upper right", fontsize=8,
                   facecolor=CLR_PANEL, labelcolor=CLR_TEXT,
-                  edgecolor=mcolors.to_rgba(CLR_GRID, 0.45), framealpha=0.92)
+                  edgecolor=mcolors.to_rgba(CLR_GRID, 1.0), framealpha=0.86)
 
-    ax3d = fig.add_axes([0.50, 0.05, 0.48, 0.89], projection="3d")
+    ax3d = fig.add_axes([0.52, 0.08, 0.46, 0.84], projection="3d")
     _style_3d_axes(ax3d)
 
     if len(support_world):
         ax3d.scatter(support_world[:, 0], support_world[:, 1], support_world[:, 2],
-                     c=CLR_SURFACE, s=13, alpha=0.42, marker="o", linewidths=0.0,
+                     c=CLR_SURFACE, s=7, alpha=0.18, marker="o", linewidths=0.0,
                      depthshade=False)
 
     if len(free_world_vis):
         ax3d.scatter(free_world_vis[:, 0], free_world_vis[:, 1], free_world_vis[:, 2],
-                     c=CLR_FREE, s=7, alpha=0.18, marker="o", linewidths=0.0,
+                     c=CLR_FREE, s=1, alpha=0.10, marker="o", linewidths=0.0,
                      depthshade=False)
 
     support_world_z = voxel_to_world(np.array([[0, 0, support_z]], dtype=np.intp), vp)[0, 2]
@@ -276,43 +331,56 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
         if np.any(upper_occ_mask):
             pts = occ_world_vis[upper_occ_mask]
             ax3d.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
-                         c=CLR_OCC, s=9, alpha=0.30, marker="o", linewidths=0.0,
+                         c=CLR_OCC, s=2, alpha=0.40, marker="o", linewidths=0.0,
                          depthshade=False)
 
-    _draw_bbox_3d(ax3d, orig_world, CLR_ORIG, lw=3.0,
+    _draw_bbox_3d(ax3d, orig_world, CLR_ORIG, lw=2.5,
                   label=f"Original: {obj_name}")
 
     ax3d.plot([], [], [], color=CLR_ARROW, lw=2.2, label="displacement")
     for k, placed_world in enumerate(placed_world_list):
-        lbl = f"Placement #{k}" if k == 0 else None
+        if k == highlight_idx:
+            continue
         _draw_bbox_3d(ax3d, placed_world, CLR_PLACE, lw=3.0,
-                      label=lbl, alpha=0.96)
+                      alpha=0.45)
 
         p_ctr = placed_world.mean(axis=0)
         disp = p_ctr - orig_ctr
         ax3d.quiver(orig_ctr[0], orig_ctr[1], orig_ctr[2],
                     disp[0], disp[1], disp[2],
-                    color=CLR_ARROW, linewidth=2.0,
-                    arrow_length_ratio=0.16, alpha=0.95)
+                    color=CLR_ARROW, linewidth=1.3,
+                    arrow_length_ratio=0.14, alpha=0.35)
+
+    _draw_bbox_3d(ax3d, highlight_world, CLR_PLACE, lw=2.0,
+                  label=f"Placement #{highlight_idx}", alpha=1.0)
+    ax3d.quiver(orig_ctr[0], orig_ctr[1], orig_ctr[2],
+                highlight_disp[0], highlight_disp[1], highlight_disp[2],
+                color=CLR_ARROW, linewidth=1.8,
+                arrow_length_ratio=0.15, alpha=0.95)
 
     cam_margin = np.array([vs * 2.0, vs * 2.0, vs * 2.0], dtype=np.float64)
     cam_in_core = np.all(cam_origin >= (view_min - cam_margin)) and np.all(cam_origin <= (view_max + cam_margin))
     if cam_in_core:
-        ax3d.scatter(*cam_origin, c=CLR_CAM, s=260, marker="*",
-                     edgecolors=mcolors.to_rgba("#FFF6A3", 0.95), linewidths=1.0,
+        ax3d.scatter(*cam_origin, c=CLR_CAM, s=80, marker="*",
+                     edgecolors=mcolors.to_rgba("#FFF6A3", 0.95), linewidths=0.8,
                      label="Camera", zorder=6, depthshade=False)
 
     ax3d.set_xlim(view_min[0], view_max[0])
     ax3d.set_ylim(view_min[1], view_max[1])
     ax3d.set_zlim(view_min[2], view_max[2])
     ax3d.set_box_aspect(tuple(view_span.tolist()))
-    ax3d.set_xlabel("X (cm)", color=CLR_TEXT, labelpad=10)
-    ax3d.set_ylabel("Y (cm)", color=CLR_TEXT, labelpad=12)
-    ax3d.set_zlabel("Z (cm)", color=CLR_TEXT, labelpad=8)
+    ax3d.set_xlabel("X (cm)", color=CLR_TEXT, labelpad=8)
+    ax3d.set_ylabel("Y (cm)", color=CLR_TEXT, labelpad=8)
+    ax3d.set_zlabel("Z (cm)", color=CLR_TEXT, labelpad=6)
+    ax3d.set_title(
+        "3-D World View\n"
+        "Orange = current position | Green = clustered placements",
+        color=CLR_TEXT, fontsize=10, pad=6)
     ax3d.view_init(elev=26, azim=-60)
 
     handles, labels = ax3d.get_legend_handles_labels()
-    desired = ["Camera", f"Original: {obj_name}", "Placement #0", "displacement"]
+    desired = ["Camera", f"Original: {obj_name}",
+               f"Placement #{highlight_idx}", "displacement"]
     ordered_handles = []
     ordered_labels = []
     for name in desired:
@@ -323,10 +391,30 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
     ax3d.legend(ordered_handles, ordered_labels,
                 fontsize=8, loc="upper left",
                 facecolor=CLR_PANEL, labelcolor=CLR_TEXT,
-                edgecolor=mcolors.to_rgba(CLR_GRID, 0.45), framealpha=0.94)
+                edgecolor=mcolors.to_rgba(CLR_GRID, 1.0), framealpha=0.86)
 
-    fig.text(0.58, 0.965,
-             f"Placement Planning ({obj_name})",
+    info = (
+        f"Target     : {obj_name}\n"
+        f"Placements : {n_reps} cluster reps\n"
+        f"Highlight  : #{highlight_idx}\n"
+        f"Delta      : ({highlight_disp[0]:+.1f}, {highlight_disp[1]:+.1f}, "
+        f"{highlight_disp[2]:+.1f}) cm\n"
+        f"|Delta|    : {highlight_dist:.1f} cm\n\n"
+        f"Highlight AABB (world, cm):\n"
+        f"  x: [{highlight_aabb[0]:.1f}, {highlight_aabb[3]:.1f}]\n"
+        f"  y: [{highlight_aabb[1]:.1f}, {highlight_aabb[4]:.1f}]\n"
+        f"  z: [{highlight_aabb[2]:.1f}, {highlight_aabb[5]:.1f}]"
+    )
+    fig.text(
+        0.535, 0.03, info,
+        fontsize=8.5, color=CLR_TEXT, family="monospace",
+        verticalalignment="bottom",
+        bbox=dict(facecolor=CLR_PANEL, edgecolor=CLR_GRID,
+                  boxstyle="round,pad=0.5", alpha=0.9),
+    )
+
+    fig.text(0.5, 0.97,
+             f"Placement Planning - Cluster Visualisation ({obj_name})",
              ha="center", va="top", color=CLR_TEXT,
              fontsize=13, fontweight="bold")
 
