@@ -250,7 +250,8 @@ class PlacementPipeline:
                     scene.rgb, name, obj.bbox3d_canonical,
                     obj.pose_world, K, E_w2c, vp, cam_origin,
                     reps, grid_base,
-                    vis_path, yaw_data, table_z + 1)
+                    vis_path, yaw_data, table_z + 1,
+                    surface_mask=surface_mask)
 
         # ── Step 6: 保存结果 ──────────────────────────────────────────────
         if output_dir:

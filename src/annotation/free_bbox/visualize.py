@@ -1,12 +1,10 @@
 """
 src/annotation/free_bbox/visualize.py
 --------------------------------------
-放置规划可视化：占据栅格切片/3D 视图、放置结果双面板可视化。
+放置规划可视化：放置结果双面板可视化。
 
 用法:
-    from src.annotation.free_bbox.visualize import (
-        visualize_slices, visualize_3d, visualize_overview, save_placement_vis,
-    )
+    from src.annotation.free_bbox.visualize import save_placement_vis
 """
 
 import numpy as np
@@ -14,146 +12,32 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
+from matplotlib import colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
-from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
+from src.annotation.free_bbox.occupancy import FREE, OCCUPIED
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners
-from src.annotation.free_bbox.voxel_utils import voxel_to_world
+from src.annotation.free_bbox.voxel_utils import voxel_to_world, world_to_voxel
 from src.utils.coord_utils import transform_points, project_world
 
-# 颜色常量
-PALETTE = ["#4CAF50", "#F44336", "#9E9E9E"]  # Free, Occupied, Unknown
-CLR_BG = "#1A1A2E"
-CLR_PANEL = "#0D0D1A"
-CLR_ORIG = "#FF6D00"
-CLR_PLACE = "#00E676"
-CLR_CAM = "#FFEB3B"
-CLR_ARROW = "#FFD54F"
-CLR_OCC = "#78909C"
-CLR_FREE = "#4CAF50"
+CLR_BG = "#1C1D31"
+CLR_PANEL = "#101223"
+CLR_TEXT = "#F3F5FF"
+CLR_MUTED = "#CCD2E6"
+CLR_GRID = "#FFFFFF"
+CLR_ORIG = "#FF8A1C"
+CLR_PLACE = "#2DE38A"
+CLR_CAM = "#FFE23F"
+CLR_ARROW = "#FFD65A"
+CLR_OCC = "#9FB2CC"
+CLR_SURFACE = "#D7E2EE"
+CLR_FREE = "#2F9B63"
 
 BOX_EDGES = [
     (0, 1), (2, 3), (4, 5), (6, 7),
     (0, 2), (1, 3), (4, 6), (5, 7),
     (0, 4), (1, 5), (2, 6), (3, 7),
 ]
-
-
-def visualize_overview(rgb, pts_world, colors, cam_origin, out_path):
-    """
-    场景概览：RGB 图像 + 3D 点云俯视图。
-
-    输入:
-        rgb: (H, W, 3) uint8 RGB 图像
-        pts_world: (N, 3) 世界坐标点云
-        colors: (N, 3) uint8 点云颜色
-        cam_origin: (3,) 相机位置
-        out_path: str 输出路径
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-    axes[0].imshow(rgb)
-    axes[0].set_title("RGB Image")
-    axes[0].axis("off")
-
-    ax = axes[1]
-    if len(pts_world) > 10000:
-        rng = np.random.default_rng(42)
-        idx = rng.choice(len(pts_world), 10000, replace=False)
-        pts_sub, clr_sub = pts_world[idx], colors[idx]
-    else:
-        pts_sub, clr_sub = pts_world, colors
-    ax.scatter(pts_sub[:, 0], pts_sub[:, 1],
-               c=clr_sub / 255.0, s=0.5, alpha=0.5)
-    ax.plot(*cam_origin[:2], "r*", markersize=10, label="Camera")
-    ax.set_title("Point Cloud (top view)")
-    ax.set_aspect("equal")
-    ax.legend()
-
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
-def visualize_slices(grid, grid_min, voxel_size, out_path):
-    """
-    占据栅格三轴中间切片可视化。
-
-    输入:
-        grid: (Gx, Gy, Gz) uint8 占据栅格
-        grid_min: (3,) 栅格最小角世界坐标
-        voxel_size: float 体素边长
-        out_path: str 输出路径
-    """
-    cmap = ListedColormap(PALETTE)
-    Gx, Gy, Gz = grid.shape
-    slices = [
-        (grid[Gx // 2, :, :].T, f"X={Gx // 2}", "Y", "Z"),
-        (grid[:, Gy // 2, :].T, f"Y={Gy // 2}", "X", "Z"),
-        (grid[:, :, Gz // 2].T, f"Z={Gz // 2}", "X", "Y"),
-    ]
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    for ax, (data, title, xl, yl) in zip(axes, slices):
-        im = ax.imshow(data, origin="lower", cmap=cmap,
-                       vmin=0, vmax=2,
-                       interpolation="nearest", aspect="auto")
-        ax.set_title(title, fontsize=10)
-        ax.set_xlabel(xl)
-        ax.set_ylabel(yl)
-
-    plt.colorbar(im, ax=axes[-1], ticks=[0, 1, 2],
-                 label="0=Free | 1=Occupied | 2=Unknown")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
-
-
-def visualize_3d(grid, grid_min, voxel_size, out_path, max_pts=6000):
-    """
-    3D 散点图：Occupied（红）+ 采样 Free（绿）。
-
-    输入:
-        grid: (Gx, Gy, Gz) uint8 占据栅格
-        grid_min: (3,) 栅格最小角世界坐标
-        voxel_size: float 体素边长
-        out_path: str 输出路径
-        max_pts: int 每类最大点数
-    """
-    occ = np.argwhere(grid == OCCUPIED)
-    free = np.argwhere(grid == FREE)
-
-    rng = np.random.default_rng(42)
-    if len(free) > max_pts:
-        free = free[rng.choice(len(free), max_pts, replace=False)]
-    if len(occ) > max_pts:
-        occ = occ[rng.choice(len(occ), max_pts, replace=False)]
-
-    def to_world(idx):
-        return grid_min + idx * voxel_size
-
-    fig = plt.figure(figsize=(12, 9))
-    ax = fig.add_subplot(111, projection="3d")
-
-    if len(free):
-        fw = to_world(free)
-        ax.scatter(fw[:, 0], fw[:, 1], fw[:, 2],
-                   c=PALETTE[0], s=1, alpha=0.15,
-                   label=f"Free ({len(free):,})")
-    if len(occ):
-        ow = to_world(occ)
-        ax.scatter(ow[:, 0], ow[:, 1], ow[:, 2],
-                   c=PALETTE[1], s=6, alpha=0.9,
-                   label=f"Occupied ({len(occ):,})")
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
-    plt.close()
 
 
 def _draw_bbox_2d(ax, corners_world, K, E_w2c,
@@ -181,9 +65,98 @@ def _draw_bbox_3d(ax, corners_world, color, lw=1.5, label=None, alpha=1.0):
                 color=color, lw=lw, alpha=alpha, label=lbl)
 
 
+def _style_3d_axes(ax):
+    """统一 3D 右面板的暗色主题样式。"""
+    ax.set_facecolor(CLR_PANEL)
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.set_facecolor(mcolors.to_rgba(CLR_PANEL, 1.0))
+        axis.pane.set_edgecolor(mcolors.to_rgba("#56607F", 0.9))
+        axis._axinfo["grid"]["color"] = mcolors.to_rgba(CLR_GRID, 0.55)
+        axis._axinfo["grid"]["linewidth"] = 1.0
+        axis._axinfo["grid"]["linestyle"] = "-"
+        try:
+            axis.line.set_color(mcolors.to_rgba(CLR_MUTED, 0.7))
+        except Exception:
+            pass
+    ax.tick_params(colors=CLR_TEXT, labelsize=10, pad=2)
+    ax.grid(True)
+
+
+def _surface_mask_to_world(surface_mask, support_z, vp):
+    """将支撑面 mask 转为世界坐标点。"""
+    if surface_mask is None:
+        return np.empty((0, 3), dtype=np.float64)
+
+    support_idx = np.argwhere(surface_mask)
+    if len(support_idx) == 0:
+        return np.empty((0, 3), dtype=np.float64)
+
+    support_idx_3d = np.column_stack([
+        support_idx,
+        np.full(len(support_idx), int(support_z), dtype=np.intp),
+    ])
+    return voxel_to_world(support_idx_3d, vp)
+
+
+def _compute_view_limits(support_world, focus_points, voxel_size):
+    """让支撑面位于底部，并由支撑面尺寸主导右面板尺度。"""
+    if len(support_world):
+        support_min = support_world.min(axis=0)
+        support_max = support_world.max(axis=0)
+        support_span_xy = np.maximum(
+            support_max[:2] - support_min[:2],
+            float(voxel_size) * 6.0,
+        )
+        xy_pad = np.maximum(support_span_xy * 0.18, float(voxel_size) * 2.0)
+        z_bottom = float(support_min[2] - 0.75 * voxel_size)
+        z_height = max(float(support_span_xy.max()) * 0.95, float(voxel_size) * 10.0)
+
+        view_min = np.array([
+            support_min[0] - xy_pad[0],
+            support_min[1] - xy_pad[1],
+            z_bottom,
+        ], dtype=np.float64)
+        view_max = np.array([
+            support_max[0] + xy_pad[0],
+            support_max[1] + xy_pad[1],
+            z_bottom + z_height,
+        ], dtype=np.float64)
+
+        if focus_points:
+            focus = np.concatenate(focus_points, axis=0)
+            focus_min = focus.min(axis=0)
+            focus_max = focus.max(axis=0)
+            focus_pad_xy = np.maximum(support_span_xy * 0.06, float(voxel_size) * 1.5)
+            view_min[:2] = np.minimum(view_min[:2], focus_min[:2] - focus_pad_xy)
+            view_max[:2] = np.maximum(view_max[:2], focus_max[:2] + focus_pad_xy)
+            view_max[2] = max(view_max[2], float(focus_max[2] + 2.5 * voxel_size))
+        return view_min, view_max
+
+    focus = np.concatenate(focus_points, axis=0)
+    focus_min = focus.min(axis=0)
+    focus_max = focus.max(axis=0)
+    span = np.maximum(focus_max - focus_min, float(voxel_size) * 6.0)
+    pad = np.maximum(span * np.array([0.14, 0.14, 0.18]), float(voxel_size) * 2.0)
+    return focus_min - pad, focus_max + pad
+
+
+def _filter_voxel_indices_to_view(indices, view_min, view_max, vp):
+    """只保留落在核心可视化窗口内的体素。"""
+    if len(indices) == 0:
+        return indices
+
+    idx_min = world_to_voxel(np.asarray(view_min, dtype=np.float64)[None, :], vp)[0] - 1
+    idx_max = world_to_voxel(np.asarray(view_max, dtype=np.float64)[None, :], vp)[0] + 1
+    mask = ((indices[:, 0] >= idx_min[0]) & (indices[:, 0] <= idx_max[0]) &
+            (indices[:, 1] >= idx_min[1]) & (indices[:, 1] <= idx_max[1]) &
+            (indices[:, 2] >= idx_min[2]) & (indices[:, 2] <= idx_max[2]))
+    return indices[mask]
+
+
 def _compute_placed_transform_vis(T_obj2world, bbox3d, anchor_xy,
-                                   landing_z, yaw_data, yaw_idx, vp):
-    """计算放置物体的 4×4 变换矩阵（可视化用）。"""
+                                  landing_z, yaw_data, yaw_idx, vp):
+    """计算放置物体的 4x4 变换矩阵（可视化用）。"""
+    del T_obj2world, bbox3d
     vs = float(vp["voxel_size"])
     T_rot = yaw_data["T_rotated"][yaw_idx]
     vmin_rot = yaw_data["vmin_rot_abs"][yaw_idx]
@@ -199,12 +172,13 @@ def _compute_placed_transform_vis(T_obj2world, bbox3d, anchor_xy,
 
 def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
                        K, E_w2c, vp, cam_origin,
-                       cluster_reps, grid, out_path, yaw_data, landing_z):
+                       cluster_reps, grid, out_path, yaw_data, landing_z,
+                       surface_mask=None):
     """
     双面板暗色主题放置可视化。
 
     左面板: RGB + 原始 bbox（橙色）+ 放置 bbox（绿色）
-    右面板: 3D 世界视图 + 点云 + bbox + 相机 + 箭头
+    右面板: 支撑面位于底部、尺度由支撑面主导的核心 3D 视图
 
     输入:
         rgb: (H, W, 3) uint8 RGB 图像
@@ -220,90 +194,140 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
         out_path: str 输出路径
         yaw_data: dict yaw 旋转数据
         landing_z: int 放置 Z 层
+        surface_mask: (Gx, Gy) bool 支撑面掩码
     """
     vs = float(vp["voxel_size"])
+    support_z = landing_z - 1
     corners_obj = _get_bbox_corners(bbox3d)
     orig_world = transform_points(corners_obj, T_obj2world)
     orig_ctr = orig_world.mean(axis=0)
     n_reps = len(cluster_reps)
     img_h, img_w = rgb.shape[:2]
+    rng = np.random.default_rng(42)
 
-    fig = plt.figure(figsize=(18, 7))
-    fig.patch.set_facecolor(CLR_BG)
-
-    # ── 左面板: RGB 图像 ──────────────────────────────────────────────
-    ax_rgb = fig.add_axes([0.02, 0.06, 0.47, 0.88])
-    ax_rgb.imshow(rgb)
-
-    _draw_bbox_2d(ax_rgb, orig_world, K, E_w2c,
-                  color=CLR_ORIG, lw=2.5,
-                  label=f"Original: {obj_name}")
-
-    for k, rep in enumerate(cluster_reps):
+    placed_world_list = []
+    for rep in cluster_reps:
         yaw_idx = int(rep[2])
         T_placed = _compute_placed_transform_vis(
             T_obj2world, bbox3d, rep[:2], landing_z, yaw_data, yaw_idx, vp)
-        placed_world = transform_points(corners_obj, T_placed)
+        placed_world_list.append(transform_points(corners_obj, T_placed))
+
+    support_world = _surface_mask_to_world(surface_mask, support_z, vp)
+    focus_points = [orig_world, *placed_world_list]
+    view_min, view_max = _compute_view_limits(support_world, focus_points, vs)
+    view_span = np.maximum(view_max - view_min, vs)
+
+    occ_idx = _filter_voxel_indices_to_view(
+        np.argwhere(grid == OCCUPIED), view_min, view_max, vp)
+    max_occ = 2600
+    if len(occ_idx) > max_occ:
+        occ_idx = occ_idx[rng.choice(len(occ_idx), max_occ, replace=False)]
+    occ_world_vis = voxel_to_world(occ_idx, vp) if len(occ_idx) else np.empty((0, 3), dtype=np.float64)
+
+    free_idx = _filter_voxel_indices_to_view(
+        np.argwhere(grid == FREE), view_min, view_max, vp)
+    max_free = 2800
+    if len(free_idx) > max_free:
+        free_idx = free_idx[rng.choice(len(free_idx), max_free, replace=False)]
+    free_world_vis = voxel_to_world(free_idx, vp) if len(free_idx) else np.empty((0, 3), dtype=np.float64)
+
+    max_support = 3600
+    if len(support_world) > max_support:
+        support_world = support_world[rng.choice(len(support_world), max_support, replace=False)]
+
+    fig = plt.figure(figsize=(18, 7.8))
+    fig.patch.set_facecolor(CLR_BG)
+
+    ax_rgb = fig.add_axes([0.02, 0.05, 0.45, 0.89])
+    ax_rgb.imshow(rgb)
+
+    _draw_bbox_2d(ax_rgb, orig_world, K, E_w2c,
+                  color=CLR_ORIG, lw=2.8,
+                  label=f"Original: {obj_name}")
+
+    for k, placed_world in enumerate(placed_world_list):
         lbl = f"Placement #{k} (of {n_reps})" if k == 0 else None
         _draw_bbox_2d(ax_rgb, placed_world, K, E_w2c,
-                      color=CLR_PLACE, lw=2.0, label=lbl, alpha=0.85)
+                      color=CLR_PLACE, lw=2.4, label=lbl, alpha=0.92)
 
     ax_rgb.set_xlim(0, img_w)
     ax_rgb.set_ylim(img_h, 0)
     ax_rgb.axis("off")
     ax_rgb.legend(loc="upper left", fontsize=8,
-                  facecolor=CLR_PANEL, labelcolor="white", framealpha=0.85)
+                  facecolor=CLR_PANEL, labelcolor=CLR_TEXT,
+                  edgecolor=mcolors.to_rgba(CLR_GRID, 0.45), framealpha=0.92)
 
-    # ── 右面板: 3D 世界视图 ───────────────────────────────────────────
-    ax3d = fig.add_axes([0.52, 0.06, 0.46, 0.88], projection="3d")
-    ax3d.set_facecolor(CLR_PANEL)
+    ax3d = fig.add_axes([0.50, 0.05, 0.48, 0.89], projection="3d")
+    _style_3d_axes(ax3d)
 
-    # 占据体素采样
-    occ_idx = np.argwhere(grid == OCCUPIED)
-    rng = np.random.default_rng(42)
-    max_occ = 3000
-    if len(occ_idx) > max_occ:
-        occ_idx = occ_idx[rng.choice(len(occ_idx), max_occ, replace=False)]
-    if len(occ_idx):
-        occ_w = voxel_to_world(occ_idx, vp)
-        ax3d.scatter(occ_w[:, 0], occ_w[:, 1], occ_w[:, 2],
-                     c=CLR_OCC, s=1, alpha=0.15, label="Scene")
+    if len(support_world):
+        ax3d.scatter(support_world[:, 0], support_world[:, 1], support_world[:, 2],
+                     c=CLR_SURFACE, s=13, alpha=0.42, marker="o", linewidths=0.0,
+                     depthshade=False)
 
-    # 原始 bbox
-    _draw_bbox_3d(ax3d, orig_world, CLR_ORIG, lw=2.5,
+    if len(free_world_vis):
+        ax3d.scatter(free_world_vis[:, 0], free_world_vis[:, 1], free_world_vis[:, 2],
+                     c=CLR_FREE, s=7, alpha=0.18, marker="o", linewidths=0.0,
+                     depthshade=False)
+
+    support_world_z = voxel_to_world(np.array([[0, 0, support_z]], dtype=np.intp), vp)[0, 2]
+    if len(occ_world_vis):
+        upper_occ_mask = occ_world_vis[:, 2] > (support_world_z + 1.25 * vs)
+        if np.any(upper_occ_mask):
+            pts = occ_world_vis[upper_occ_mask]
+            ax3d.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                         c=CLR_OCC, s=9, alpha=0.30, marker="o", linewidths=0.0,
+                         depthshade=False)
+
+    _draw_bbox_3d(ax3d, orig_world, CLR_ORIG, lw=3.0,
                   label=f"Original: {obj_name}")
 
-    # 放置 bbox + 箭头
-    for k, rep in enumerate(cluster_reps):
-        yaw_idx = int(rep[2])
-        T_placed = _compute_placed_transform_vis(
-            T_obj2world, bbox3d, rep[:2], landing_z, yaw_data, yaw_idx, vp)
-        placed_world = transform_points(corners_obj, T_placed)
+    ax3d.plot([], [], [], color=CLR_ARROW, lw=2.2, label="displacement")
+    for k, placed_world in enumerate(placed_world_list):
         lbl = f"Placement #{k}" if k == 0 else None
-        _draw_bbox_3d(ax3d, placed_world, CLR_PLACE, lw=2.0,
-                      label=lbl, alpha=0.85)
+        _draw_bbox_3d(ax3d, placed_world, CLR_PLACE, lw=3.0,
+                      label=lbl, alpha=0.96)
 
         p_ctr = placed_world.mean(axis=0)
-        ax3d.plot([orig_ctr[0], p_ctr[0]],
-                  [orig_ctr[1], p_ctr[1]],
-                  [orig_ctr[2], p_ctr[2]],
-                  color=CLR_ARROW, lw=1.2, ls="--", alpha=0.7)
+        disp = p_ctr - orig_ctr
+        ax3d.quiver(orig_ctr[0], orig_ctr[1], orig_ctr[2],
+                    disp[0], disp[1], disp[2],
+                    color=CLR_ARROW, linewidth=2.0,
+                    arrow_length_ratio=0.16, alpha=0.95)
 
-    # 相机位置
-    ax3d.scatter(*cam_origin, c=CLR_CAM, s=60, marker="^",
-                 edgecolors="white", linewidths=0.5, label="Camera", zorder=5)
+    cam_margin = np.array([vs * 2.0, vs * 2.0, vs * 2.0], dtype=np.float64)
+    cam_in_core = np.all(cam_origin >= (view_min - cam_margin)) and np.all(cam_origin <= (view_max + cam_margin))
+    if cam_in_core:
+        ax3d.scatter(*cam_origin, c=CLR_CAM, s=260, marker="*",
+                     edgecolors=mcolors.to_rgba("#FFF6A3", 0.95), linewidths=1.0,
+                     label="Camera", zorder=6, depthshade=False)
 
-    ax3d.set_xlabel("X", color="white")
-    ax3d.set_ylabel("Y", color="white")
-    ax3d.set_zlabel("Z", color="white")
-    ax3d.tick_params(colors="white")
-    ax3d.legend(fontsize=8, loc="upper left",
-                facecolor=CLR_PANEL, labelcolor="white", framealpha=0.85)
+    ax3d.set_xlim(view_min[0], view_max[0])
+    ax3d.set_ylim(view_min[1], view_max[1])
+    ax3d.set_zlim(view_min[2], view_max[2])
+    ax3d.set_box_aspect(tuple(view_span.tolist()))
+    ax3d.set_xlabel("X (cm)", color=CLR_TEXT, labelpad=10)
+    ax3d.set_ylabel("Y (cm)", color=CLR_TEXT, labelpad=12)
+    ax3d.set_zlabel("Z (cm)", color=CLR_TEXT, labelpad=8)
+    ax3d.view_init(elev=26, azim=-60)
 
-    # 标题
-    fig.text(0.5, 0.97,
-             f"Placement Planning — {obj_name}",
-             ha="center", va="top", color="white",
+    handles, labels = ax3d.get_legend_handles_labels()
+    desired = ["Camera", f"Original: {obj_name}", "Placement #0", "displacement"]
+    ordered_handles = []
+    ordered_labels = []
+    for name in desired:
+        if name in labels:
+            idx = labels.index(name)
+            ordered_handles.append(handles[idx])
+            ordered_labels.append(labels[idx])
+    ax3d.legend(ordered_handles, ordered_labels,
+                fontsize=8, loc="upper left",
+                facecolor=CLR_PANEL, labelcolor=CLR_TEXT,
+                edgecolor=mcolors.to_rgba(CLR_GRID, 0.45), framealpha=0.94)
+
+    fig.text(0.58, 0.965,
+             f"Placement Planning ({obj_name})",
+             ha="center", va="top", color=CLR_TEXT,
              fontsize=13, fontweight="bold")
 
     plt.savefig(out_path, dpi=150, facecolor=fig.get_facecolor(),
