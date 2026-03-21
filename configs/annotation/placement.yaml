@@ -40,4 +40,4 @@ compute:
 
 # 输出
 output:
-  dir: "outputs/placement"       # 输出根目录，内部按文件类型分目录
+  dir: "outputs/hope_placement"       # 输出根目录，内部按文件类型分目录

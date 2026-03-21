@@ -541,7 +541,23 @@ python tools/run_placement.py \
     --output outputs/placement
 ```
 
-### 6.5 GPU 加速（需要 CuPy）
+### 6.5 并发批量处理（CPU 推荐）
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch --workers 8 \
+    --no-vis \
+    --output outputs/placement
+```
+
+说明：
+- `--workers N` 会把 batch 展开的 `scene/frame` 任务分发到 `N` 个子进程
+- 当前输出按 `scene_id + frame_id` 命名，只要同一批任务不重复处理同一个帧，并发写出就是安全的
+- 如果你同时跑多组不同实验，建议为每组实验设置不同的 `--output` 目录，避免结果互相覆盖
+- `--gpu` 时通常建议先从 `--workers 1` 开始，多个 GPU worker 容易出现显存竞争
+
+### 6.6 GPU 加速（需要 CuPy）
 
 ```bash
 # 安装 CuPy（根据 CUDA 版本选择）
@@ -554,7 +570,7 @@ python tools/run_placement.py \
     --output outputs/placement
 ```
 
-### 6.6 Python API 调用
+### 6.7 Python API 调用
 
 ```python
 from src.annotation.free_bbox.datatypes import PlacementConfig
@@ -587,7 +603,7 @@ for obj_id, result in results.items():
         print(f"  位置: {p['center_world']}, yaw: {p['yaw_degrees']:.1f} deg")
 ```
 
-### 6.7 跳过可视化（加速）
+### 6.8 跳过可视化（加速）
 
 ```bash
 python tools/run_placement.py \
@@ -596,7 +612,7 @@ python tools/run_placement.py \
     --output outputs/placement
 ```
 
-### 6.8 常见问题
+### 6.9 常见问题
 
 **Q: 所有物体都被 SKIP（no support surface）**
 - 检查 `min_surface_area` 是否过大
@@ -613,6 +629,7 @@ python tools/run_placement.py \
 - 减小 `yaw_steps`（24→8）
 - 增大 `voxel_size`（1.0→2.0）
 - 启用 GPU（`--gpu`）
+- 在 CPU 批量场景下使用 `--workers 4` 到 `--workers 8` 并发处理
 
 **Q: 接入新数据集后结果异常**
 - 首先验证单位一致性：打印 `scene.depth.max()` 和 `scene.camera.E_c2w[:3, 3]`，两者量级应相同

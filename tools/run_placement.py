@@ -15,21 +15,31 @@ tools/run_placement.py
         --frame 0000 \
         --output outputs/placement
 
-    # 批量处理所有场景
+    # 串行批量处理所有场景
     python tools/run_placement.py \
         --config configs/annotation/placement.yaml \
         --batch \
         --output outputs/placement
 
+    # 多进程并发批量处理
+    python tools/run_placement.py \
+        --config configs/annotation/placement.yaml \
+        --batch --workers 8 \
+        --output outputs/placement
+
     # 使用 GPU 加速
     python tools/run_placement.py \
         --config configs/annotation/placement.yaml \
-        --batch --gpu
+        --batch --gpu \
+        --output outputs/placement
 """
 
 import argparse
+import concurrent.futures as cf
+import multiprocessing as mp
 import os
 import sys
+import traceback
 import yaml
 from pathlib import Path
 
@@ -113,6 +123,125 @@ def process_single(adapter, pipeline, scene_path, frame_id,
     return results
 
 
+def expand_batch_tasks(scenes):
+    """将 adapter.list_scenes() 结果展开成单帧任务列表。"""
+    tasks = []
+    for scene_path, frame_ids in scenes:
+        for frame_id in frame_ids:
+            tasks.append((scene_path, frame_id))
+    return tasks
+
+
+def process_task_worker(config_path, scene_path, frame_id,
+                        output_root, save_vis, use_gpu):
+    """子进程 worker：独立完成单个 scene/frame 任务。"""
+    scene_name = Path(scene_path).name
+
+    try:
+        cfg = load_config(config_path)
+        adapter = build_adapter(cfg)
+        placement_cfg = build_placement_config(cfg)
+        pipeline = PlacementPipeline(config=placement_cfg, use_gpu=use_gpu)
+
+        process_single(
+            adapter=adapter,
+            pipeline=pipeline,
+            scene_path=scene_path,
+            frame_id=frame_id,
+            output_root=output_root,
+            save_vis=save_vis,
+        )
+        return {
+            "ok": True,
+            "scene": scene_name,
+            "frame": frame_id,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "scene": scene_name,
+            "frame": frame_id,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis):
+    """串行处理 batch 任务。"""
+    success = 0
+    failed = 0
+
+    for idx, (scene_path, frame_id) in enumerate(tasks, start=1):
+        scene_name = Path(scene_path).name
+        print(f"\n[Task {idx}/{len(tasks)}] {scene_name}/{frame_id}")
+        try:
+            process_single(
+                adapter,
+                pipeline,
+                scene_path,
+                frame_id,
+                output_root,
+                save_vis,
+            )
+            success += 1
+        except Exception as exc:
+            failed += 1
+            print(f"[ERROR] {scene_name}/{frame_id}: {exc}")
+            print(traceback.format_exc())
+
+    return success, failed
+
+
+def process_batch_parallel(config_path, tasks, output_root,
+                           save_vis, use_gpu, workers):
+    """多进程并发处理 batch 任务。"""
+    success = 0
+    failed = 0
+    mp_ctx = mp.get_context("spawn")
+
+    with cf.ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=mp_ctx,
+    ) as executor:
+        future_to_task = {
+            executor.submit(
+                process_task_worker,
+                config_path,
+                scene_path,
+                frame_id,
+                output_root,
+                save_vis,
+                use_gpu,
+            ): (scene_path, frame_id)
+            for scene_path, frame_id in tasks
+        }
+
+        for idx, future in enumerate(cf.as_completed(future_to_task), start=1):
+            scene_path, frame_id = future_to_task[future]
+            scene_name = Path(scene_path).name
+
+            try:
+                result = future.result()
+            except Exception as exc:
+                failed += 1
+                print(f"[{idx}/{len(tasks)}] [ERROR] {scene_name}/{frame_id}: {exc}")
+                print(traceback.format_exc())
+                continue
+
+            if result["ok"]:
+                success += 1
+                print(f"[{idx}/{len(tasks)}] [OK] {result['scene']}/{result['frame']}")
+            else:
+                failed += 1
+                print(
+                    f"[{idx}/{len(tasks)}] [ERROR] "
+                    f"{result['scene']}/{result['frame']}: {result['error']}"
+                )
+                print(result["traceback"])
+
+    return success, failed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Placement Planning Pipeline")
@@ -130,7 +259,12 @@ def main():
                         help="Enable GPU acceleration")
     parser.add_argument("--no-vis", action="store_true",
                         help="Skip visualization")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of worker processes for --batch (default: 1)")
     args = parser.parse_args()
+
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
 
     cfg = load_config(args.config)
     adapter = build_adapter(cfg)
@@ -145,17 +279,41 @@ def main():
 
     if args.batch:
         scenes = adapter.list_scenes()
-        print(f"Found {len(scenes)} scenes to process.")
-        for scene_path, frame_ids in scenes:
-            scene_name = Path(scene_path).name
-            for fid in frame_ids:
-                try:
-                    process_single(adapter, pipeline, scene_path, fid,
-                                   output_root, save_vis)
-                except Exception as e:
-                    print(f"[ERROR] {scene_name}/{fid}: {e}")
-                    import traceback
-                    traceback.print_exc()
+        tasks = expand_batch_tasks(scenes)
+        workers = min(args.workers, max(len(tasks), 1))
+
+        print(
+            f"Found {len(scenes)} scenes and {len(tasks)} frames to process "
+            f"with {workers} worker(s)."
+        )
+        if use_gpu and workers > 1:
+            print(
+                "[WARN] Running multiple GPU workers may cause GPU memory "
+                "contention or reduced throughput."
+            )
+
+        if workers == 1:
+            success, failed = process_batch_serial(
+                adapter=adapter,
+                pipeline=pipeline,
+                tasks=tasks,
+                output_root=output_root,
+                save_vis=save_vis,
+            )
+        else:
+            success, failed = process_batch_parallel(
+                config_path=str(Path(args.config).resolve()),
+                tasks=tasks,
+                output_root=output_root,
+                save_vis=save_vis,
+                use_gpu=use_gpu,
+                workers=workers,
+            )
+
+        print(
+            f"\n[BATCH DONE] success={success} failed={failed} "
+            f"total={len(tasks)}"
+        )
 
     elif args.scene and args.frame:
         process_single(adapter, pipeline, args.scene, args.frame,
