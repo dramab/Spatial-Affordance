@@ -1,10 +1,13 @@
 """
 src/annotation/free_bbox/io_utils.py
 --------------------------------------
-I/O 工具：PLY 点云导出、占据栅格导出、放置结果 JSON 读写。
+I/O 工具：PLY 点云导出、占据栅格导出、JSON 标注读写。
 
 用法:
-    from src.annotation.free_bbox.io_utils import save_ply, save_occupancy_ply, save_placement_result
+    from src.annotation.free_bbox.io_utils import (
+        save_ply, save_occupancy_ply,
+        save_placement_annotations, save_placement_samples,
+    )
 """
 
 import json
@@ -76,35 +79,40 @@ def save_occupancy_ply(path, grid, grid_min, voxel_size,
     save_ply(path, pts, colors)
 
 
-def save_placement_result(path, config_dict, object_results):
-    """
-    保存放置规划结果为 JSON 文件。
-
-    输入:
-        path: str 输出文件路径
-        config_dict: dict 配置参数
-        object_results: dict {obj_id: result_dict} 每个物体的结果
-    """
-    summary = {
-        "config": config_dict,
-        "objects": object_results,
-    }
+def save_json(path, data):
+    """保存 JSON 数据。"""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
-        json.dump(summary, f, indent=2, default=_json_default)
+        json.dump(data, f, indent=2, default=_json_default)
+
+
+def save_placement_annotations(path, annotations):
+    """保存按物体分组的 placement 主标注。"""
+    save_json(path, annotations)
+
+
+def save_placement_samples(path, samples):
+    """保存按 placement 展平的样本标注。"""
+    save_json(path, samples)
+
+
+def save_placement_result(path, config_dict, object_results):
+    """兼容旧接口：保存旧版 placement 结果。"""
+    save_json(path, {
+        "config": config_dict,
+        "objects": object_results,
+    })
+
+
+def load_json(path):
+    """加载 JSON 文件。"""
+    with open(path, "r") as f:
+        return json.load(f)
 
 
 def load_placement_result(path):
-    """
-    加载放置规划结果 JSON。
-
-    输入:
-        path: str JSON 文件路径
-    输出:
-        dict 放置结果
-    """
-    with open(path, "r") as f:
-        return json.load(f)
+    """兼容旧接口：加载 placement 结果 JSON。"""
+    return load_json(path)
 
 
 def save_grid_meta(path, voxel_params, grid_shape, voxel_counts=None,

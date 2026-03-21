@@ -140,13 +140,15 @@ class PlacementResult:
         obj_id: 物体标识
         class_name: 类别名
         original_aabb_world: (6,) 原始位置的世界坐标 AABB
-        placements: 放置候选列表，每个元素为 dict:
+        placements: 放置样本列表，每个元素为 dict:
             {
+                "sample_id": str,
+                "rank": int,
                 "center_world": [x, y, z],
-                "aabb_world": [min_x, min_y, min_z, max_x, max_y, max_z],
-                "yaw_rad": float,
+                "yaw_degrees": float,
                 "transform_world": (4,4) list,
-                "free_space_score": float,
+                "aabb_world": [min_x, min_y, min_z, max_x, max_y, max_z],
+                "free_space_score": int,
             }
         num_raw_candidates: 过滤前的候选总数
         num_after_stability: 稳定性过滤后数量

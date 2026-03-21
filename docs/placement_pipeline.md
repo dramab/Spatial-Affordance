@@ -149,7 +149,7 @@ configs/
 | `filters.py` | `filter_stable/visible/occluded_placements` | 三级过滤 |
 | `cluster.py` | `cluster_placements` | DBSCAN 聚类 |
 | `pipeline.py` | `PlacementPipeline.run` | 流程编排 |
-| `io_utils.py` | `save_ply`, `save_placement_result` | 结果持久化 |
+| `io_utils.py` | `save_ply`, `save_placement_annotations`, `save_placement_samples` | 结果持久化 |
 | `visualize.py` | `save_placement_vis` | 双面板可视化 |
 
 ---
@@ -333,69 +333,102 @@ elif ds_type == "my_dataset":
 ### 5.1 目录结构
 
 ```
-output_dir/
-├── placement_result.json       # 主结果文件
-├── grid_meta.json              # 占据栅格元信息
-├── occupancy_grid.npy          # 占据栅格数组
-├── occupancy_grid.ply          # 占据栅格点云（可视化用）
-├── point_cloud.ply             # 场景点云
-└── placement_{ClassName}/
-    └── placement_vis.png       # 双面板可视化图
+output_root/
+├── placements/
+│   ├── scene_0003_0002.json
+│   └── ...
+├── samples/
+│   ├── scene_0003_0002.json
+│   └── ...
+├── visualizations/
+│   ├── scene_0003_0002_obj_0_Cookies.png
+│   └── ...
+├── point_clouds/
+│   ├── scene_0003_0002.ply
+│   └── ...
+├── occupancy_grids/
+│   ├── scene_0003_0002.npy
+│   ├── scene_0003_0002.ply
+│   └── ...
+└── grid_meta/
+    ├── scene_0003_0002.json
+    └── ...
 ```
 
-### 5.2 placement_result.json 格式
+说明：
+- 同一帧的所有输出通过 `{scene_id}_{frame_id}` 文件名前缀关联。
+- `placements/` 保存按物体分组的主标注。
+- `samples/` 保存按 placement 展平后的训练样本。
+- `point_clouds/`、`occupancy_grids/`、`grid_meta/` 是每帧都会生成的必要文件。
+- `visualizations/` 仅在开启 `save_vis` 时保存。
+
+### 5.2 placements JSON 格式
 
 ```json
 {
-  "config": {
-    "voxel_size": 1.0,
-    "safety_margin": 0.5,
-    "yaw_steps": 24,
-    "min_support_ratio": 1.0,
-    "occlusion_threshold": 0.3,
-    "dbscan_eps": 5.0,
-    "gpu_used": false
-  },
-  "objects": {
-    "obj_0": {
+  "schema_version": "placement_annotations/v1",
+  "scene_id": "scene_0003",
+  "frame_id": "0002",
+  "unit": "cm",
+  "objects": [
+    {
+      "object_id": "obj_0",
       "class_name": "CreamCheese",
-      "num_raw": 13,
-      "num_stable": 13,
-      "num_visible": 8,
-      "num_unoccluded": 5,
+      "canonical_aabb_object": [xmin, ymin, zmin, xmax, ymax, zmax],
+      "original_pose_world": [[...], [...], [...], [...]],
       "original_aabb_world": [x1, y1, z1, x2, y2, z2],
-      "clusters": [
+      "placements": [
         {
-          "cluster_id": 0,
-          "size": 3,
-          "anchor_voxel": [vx, vy, yaw_idx],
-          "anchor_world": [wx, wy, wz],
-          "yaw_index": 1,
+          "sample_id": "scene_0003_0002_obj_0_p000",
+          "rank": 0,
+          "center_world": [x, y, z],
           "yaw_degrees": 15.0,
-          "free_score": 142.0
+          "transform_world": [[...], [...], [...], [...]],
+          "aabb_world": [x1, y1, z1, x2, y2, z2],
+          "free_space_score": 142
         }
       ]
     }
-  }
+  ]
 }
 ```
 
-### 5.3 字段说明
+### 5.3 samples JSON 格式
 
-| 字段 | 说明 |
-|---|---|
-| `num_raw` | FFT 碰撞搜索后的原始候选数（所有 yaw 角度合计） |
-| `num_stable` | 稳定性过滤后剩余数 |
-| `num_visible` | 可见性过滤后剩余数 |
-| `num_unoccluded` | 遮挡过滤后剩余数 |
-| `clusters` | DBSCAN 聚类结果，每个元素为一个聚类的代表放置位置 |
-| `anchor_world` | 放置锚点的世界坐标（对应候选 `anchor_voxel` 的体素中心） |
-| `yaw_index` | 放置时使用的 yaw 离散索引 |
-| `yaw_degrees` | 放置时物体绕 Z 轴的旋转角度（度） |
-| `free_score` | 该位置周围自由空间体素数，越大表示周围越空旷 |
-| `original_aabb_world` | 物体原始位置的世界坐标 AABB（用于对比） |
+```json
+{
+  "schema_version": "placement_samples/v1",
+  "scene_id": "scene_0003",
+  "frame_id": "0002",
+  "unit": "cm",
+  "samples": [
+    {
+      "sample_id": "scene_0003_0002_obj_0_p000",
+      "scene_id": "scene_0003",
+      "frame_id": "0002",
+      "unit": "cm",
+      "object_id": "obj_0",
+      "class_name": "CreamCheese",
+      "rank": 0,
+      "canonical_aabb_object": [xmin, ymin, zmin, xmax, ymax, zmax],
+      "original_pose_world": [[...], [...], [...], [...]],
+      "original_aabb_world": [x1, y1, z1, x2, y2, z2],
+      "center_world": [x, y, z],
+      "yaw_degrees": 15.0,
+      "transform_world": [[...], [...], [...], [...]],
+      "aabb_world": [x1, y1, z1, x2, y2, z2],
+      "free_space_score": 142
+    }
+  ]
+}
+```
 
-### 5.4 grid_meta.json 格式
+说明：
+- `placements` 中只保留有有效放置位置的物体。
+- `samples` 中每个元素对应一条可直接用于训练的 placement 样本。
+- `rank` 按同一物体内的候选排序，`free_space_score` 越大表示周围越空旷。
+
+### 5.4 grid_meta JSON 格式
 
 ```json
 {
@@ -408,33 +441,32 @@ output_dir/
     "free": 123456,
     "occupied": 7890,
     "unknown": 11111
-  }
+  },
+  "scene_id": "scene_0003",
+  "frame_id": "0002",
+  "unit": "cm"
 }
 ```
 
-### 5.5 如何使用放置结果
+### 5.5 如何使用输出结果
 
 ```python
 import json
-import numpy as np
-from src.annotation.free_bbox.voxel_utils import make_voxel_params
-from src.utils.coord_utils import transform_points
 
-# 加载结果
-with open("output_dir/placement_result.json") as f:
-    result = json.load(f)
+with open("output_root/placements/scene_0003_0002.json") as f:
+    placements = json.load(f)
 
-with open("output_dir/grid_meta.json") as f:
+with open("output_root/samples/scene_0003_0002.json") as f:
+    samples = json.load(f)
+
+with open("output_root/grid_meta/scene_0003_0002.json") as f:
     meta = json.load(f)
 
-vp = meta["voxel_params"]
+for obj in placements["objects"]:
+    print(obj["class_name"], len(obj["placements"]))
 
-# 读取某物体的放置位置
-obj = result["objects"]["obj_0"]
-for cluster in obj["clusters"]:
-    anchor_world = np.array(cluster["anchor_world"])  # 世界坐标
-    yaw_deg = cluster["yaw_degrees"]                 # 旋转角度（度）
-    print(f"放置位置: {anchor_world}, yaw: {yaw_deg:.1f} deg")
+for sample in samples["samples"]:
+    print(sample["sample_id"], sample["center_world"], sample["yaw_degrees"])
 ```
 
 ---
@@ -480,7 +512,6 @@ clustering:
 
 visualization:
   save_vis: true
-  save_ply: true
   vis_margin_px: 30       # 可见性检查图像边距（像素）
 
 compute:
@@ -498,7 +529,7 @@ python tools/run_placement.py \
     --config configs/annotation/placement.yaml \
     --scene /path/to/hope_video/scene_0001 \
     --frame 0000 \
-    --output outputs/placement/scene_0001/0000
+    --output outputs/placement
 ```
 
 ### 6.4 批量处理
@@ -551,17 +582,17 @@ results = pipeline.run(scene, output_dir="outputs/test", save_vis=True)
 
 # 查看结果
 for obj_id, result in results.items():
-    print(f"{result.class_name}: {len(result.placements)} 个放置聚类")
+    print(f"{result.class_name}: {len(result.placements)} 个放置样本")
     for p in result.placements:
-        print(f"  位置: {p['anchor_world']}, yaw: {p['yaw_rad']:.3f}")
+        print(f"  位置: {p['center_world']}, yaw: {p['yaw_degrees']:.1f} deg")
 ```
 
-### 6.7 跳过可视化/PLY 导出（加速）
+### 6.7 跳过可视化（加速）
 
 ```bash
 python tools/run_placement.py \
     --config configs/annotation/placement.yaml \
-    --batch --no-vis --no-ply \
+    --batch --no-vis \
     --output outputs/placement
 ```
 

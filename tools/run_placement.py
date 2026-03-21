@@ -13,7 +13,7 @@ tools/run_placement.py
         --config configs/annotation/placement.yaml \
         --scene /path/to/scene_0001 \
         --frame 0000 \
-        --output outputs/placement/scene_0001/0000
+        --output outputs/placement
 
     # 批量处理所有场景
     python tools/run_placement.py \
@@ -91,20 +91,19 @@ def build_placement_config(cfg):
 
 
 def process_single(adapter, pipeline, scene_path, frame_id,
-                    output_dir, save_vis, save_ply):
+                   output_root, save_vis):
     """处理单个场景的单帧。"""
     print(f"\n{'='*60}")
     print(f"Scene: {scene_path}  Frame: {frame_id}")
     print(f"{'='*60}")
 
     scene_data = adapter.load_scene(scene_path, frame_id)
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_root, exist_ok=True)
 
     results = pipeline.run(
         scene_data,
-        output_dir=output_dir,
+        output_dir=output_root,
         save_vis=save_vis,
-        save_ply_files=save_ply,
     )
 
     n_objects = len(results)
@@ -126,13 +125,11 @@ def main():
     parser.add_argument("--batch", action="store_true",
                         help="Batch process all scenes")
     parser.add_argument("--output", type=str, default=None,
-                        help="Output directory")
+                        help="Output root directory")
     parser.add_argument("--gpu", action="store_true",
                         help="Enable GPU acceleration")
     parser.add_argument("--no-vis", action="store_true",
                         help="Skip visualization")
-    parser.add_argument("--no-ply", action="store_true",
-                        help="Skip PLY export")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -141,11 +138,10 @@ def main():
 
     use_gpu = args.gpu or cfg.get("compute", {}).get("use_gpu", False)
     save_vis = not args.no_vis and cfg.get("visualization", {}).get("save_vis", True)
-    save_ply = not args.no_ply and cfg.get("visualization", {}).get("save_ply", True)
 
     pipeline = PlacementPipeline(config=placement_cfg, use_gpu=use_gpu)
 
-    output_base = args.output or cfg.get("output", {}).get("dir", "outputs/placement")
+    output_root = args.output or cfg.get("output", {}).get("dir", "outputs/placement")
 
     if args.batch:
         scenes = adapter.list_scenes()
@@ -153,19 +149,17 @@ def main():
         for scene_path, frame_ids in scenes:
             scene_name = Path(scene_path).name
             for fid in frame_ids:
-                out_dir = os.path.join(output_base, scene_name, fid)
                 try:
                     process_single(adapter, pipeline, scene_path, fid,
-                                   out_dir, save_vis, save_ply)
+                                   output_root, save_vis)
                 except Exception as e:
                     print(f"[ERROR] {scene_name}/{fid}: {e}")
                     import traceback
                     traceback.print_exc()
 
     elif args.scene and args.frame:
-        out_dir = output_base
         process_single(adapter, pipeline, args.scene, args.frame,
-                       out_dir, save_vis, save_ply)
+                       output_root, save_vis)
     else:
         parser.error("Specify --scene + --frame for single, or --batch for all.")
 

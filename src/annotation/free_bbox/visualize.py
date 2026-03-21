@@ -65,36 +65,6 @@ def _draw_bbox_3d(ax, corners_world, color, lw=1.5, label=None, alpha=1.0):
                 color=color, lw=lw, alpha=alpha, label=lbl)
 
 
-def _annotate_projected_center(ax, point_world, text, K, E_w2c,
-                               color, dx, dy):
-    """在 2D 投影图上标注一个世界坐标点。"""
-    uv, z = project_world(np.asarray(point_world, dtype=np.float64)[None, :],
-                          K, E_w2c)
-    if z[0] <= 0:
-        return
-    ax.annotate(
-        text,
-        xy=(uv[0, 0], uv[0, 1]),
-        xytext=(uv[0, 0] + dx, uv[0, 1] + dy),
-        color=color,
-        fontsize=9,
-        fontweight="bold",
-        arrowprops=dict(arrowstyle="->", color=color, lw=1.2),
-    )
-
-
-def _select_highlight_index(placed_world_list, orig_ctr):
-    """选择位移长度居中的代表性放置结果用于高亮展示。"""
-    if len(placed_world_list) == 1:
-        return 0
-
-    centers = np.array([corners.mean(axis=0) for corners in placed_world_list],
-                       dtype=np.float64)
-    disp_norms = np.linalg.norm(centers - orig_ctr[None, :], axis=1)
-    order = np.argsort(disp_norms)
-    return int(order[len(order) // 2])
-
-
 def _style_3d_axes(ax):
     """统一 3D 右面板的暗色主题样式。"""
     ax.set_facecolor(CLR_PANEL)
@@ -242,13 +212,14 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
             T_obj2world, bbox3d, rep[:2], landing_z, yaw_data, yaw_idx, vp)
         placed_world_list.append(transform_points(corners_obj, T_placed))
 
-    highlight_idx = _select_highlight_index(placed_world_list, orig_ctr)
-    highlight_world = placed_world_list[highlight_idx]
-    highlight_ctr = highlight_world.mean(axis=0)
-    highlight_disp = highlight_ctr - orig_ctr
-    highlight_dist = float(np.linalg.norm(highlight_disp))
-    highlight_aabb = np.concatenate(
-        [highlight_world.min(axis=0), highlight_world.max(axis=0)])
+    placement_centers = np.array(
+        [placed_world.mean(axis=0) for placed_world in placed_world_list],
+        dtype=np.float64)
+    placement_disp = placement_centers - orig_ctr[None, :]
+    placement_disp_norms = np.linalg.norm(placement_disp, axis=1)
+    placement_bounds = np.concatenate(placed_world_list, axis=0)
+    placement_aabb = np.concatenate(
+        [placement_bounds.min(axis=0), placement_bounds.max(axis=0)])
 
     support_world = _surface_mask_to_world(surface_mask, support_z, vp)
     focus_points = [orig_world, *placed_world_list]
@@ -284,22 +255,9 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
                   label=f"Original: {obj_name}")
 
     for k, placed_world in enumerate(placed_world_list):
-        if k == highlight_idx:
-            continue
+        lbl = f"Placement #{k} (of {n_reps})" if k == 0 else None
         _draw_bbox_2d(ax_rgb, placed_world, K, E_w2c,
-                      color=CLR_PLACE, lw=1.8, alpha=0.55)
-
-    _draw_bbox_2d(ax_rgb, highlight_world, K, E_w2c,
-                  color=CLR_PLACE, lw=2.2,
-                  label=f"Placement #{highlight_idx} (of {n_reps})",
-                  alpha=0.98)
-
-    _annotate_projected_center(
-        ax_rgb, orig_ctr, obj_name, K, E_w2c,
-        CLR_ORIG, dx=20, dy=-25)
-    _annotate_projected_center(
-        ax_rgb, highlight_ctr, f"Placement\n#{highlight_idx}", K, E_w2c,
-        CLR_PLACE, dx=24, dy=28)
+                      color=CLR_PLACE, lw=2.0, label=lbl, alpha=0.78)
 
     ax_rgb.set_xlim(0, img_w)
     ax_rgb.set_ylim(img_h, 0)
@@ -339,24 +297,16 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
 
     ax3d.plot([], [], [], color=CLR_ARROW, lw=2.2, label="displacement")
     for k, placed_world in enumerate(placed_world_list):
-        if k == highlight_idx:
-            continue
-        _draw_bbox_3d(ax3d, placed_world, CLR_PLACE, lw=3.0,
-                      alpha=0.45)
+        lbl = f"Placement #{k}" if k == 0 else None
+        _draw_bbox_3d(ax3d, placed_world, CLR_PLACE, lw=2.0,
+                      label=lbl, alpha=0.82)
 
         p_ctr = placed_world.mean(axis=0)
         disp = p_ctr - orig_ctr
         ax3d.quiver(orig_ctr[0], orig_ctr[1], orig_ctr[2],
                     disp[0], disp[1], disp[2],
-                    color=CLR_ARROW, linewidth=1.3,
-                    arrow_length_ratio=0.14, alpha=0.35)
-
-    _draw_bbox_3d(ax3d, highlight_world, CLR_PLACE, lw=2.0,
-                  label=f"Placement #{highlight_idx}", alpha=1.0)
-    ax3d.quiver(orig_ctr[0], orig_ctr[1], orig_ctr[2],
-                highlight_disp[0], highlight_disp[1], highlight_disp[2],
-                color=CLR_ARROW, linewidth=1.8,
-                arrow_length_ratio=0.15, alpha=0.95)
+                    color=CLR_ARROW, linewidth=1.5,
+                    arrow_length_ratio=0.14, alpha=0.55)
 
     cam_margin = np.array([vs * 2.0, vs * 2.0, vs * 2.0], dtype=np.float64)
     cam_in_core = np.all(cam_origin >= (view_min - cam_margin)) and np.all(cam_origin <= (view_max + cam_margin))
@@ -379,8 +329,7 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
     ax3d.view_init(elev=26, azim=-60)
 
     handles, labels = ax3d.get_legend_handles_labels()
-    desired = ["Camera", f"Original: {obj_name}",
-               f"Placement #{highlight_idx}", "displacement"]
+    desired = ["Camera", f"Original: {obj_name}", "Placement #0", "displacement"]
     ordered_handles = []
     ordered_labels = []
     for name in desired:
@@ -396,14 +345,13 @@ def save_placement_vis(rgb, obj_name, bbox3d, T_obj2world,
     info = (
         f"Target     : {obj_name}\n"
         f"Placements : {n_reps} cluster reps\n"
-        f"Highlight  : #{highlight_idx}\n"
-        f"Delta      : ({highlight_disp[0]:+.1f}, {highlight_disp[1]:+.1f}, "
-        f"{highlight_disp[2]:+.1f}) cm\n"
-        f"|Delta|    : {highlight_dist:.1f} cm\n\n"
-        f"Highlight AABB (world, cm):\n"
-        f"  x: [{highlight_aabb[0]:.1f}, {highlight_aabb[3]:.1f}]\n"
-        f"  y: [{highlight_aabb[1]:.1f}, {highlight_aabb[4]:.1f}]\n"
-        f"  z: [{highlight_aabb[2]:.1f}, {highlight_aabb[5]:.1f}]"
+        f"|Delta| min: {placement_disp_norms.min():.1f} cm\n"
+        f"|Delta| max: {placement_disp_norms.max():.1f} cm\n"
+        f"|Delta| avg: {placement_disp_norms.mean():.1f} cm\n\n"
+        f"Placement AABB union (world, cm):\n"
+        f"  x: [{placement_aabb[0]:.1f}, {placement_aabb[3]:.1f}]\n"
+        f"  y: [{placement_aabb[1]:.1f}, {placement_aabb[4]:.1f}]\n"
+        f"  z: [{placement_aabb[2]:.1f}, {placement_aabb[5]:.1f}]"
     )
     fig.text(
         0.535, 0.03, info,

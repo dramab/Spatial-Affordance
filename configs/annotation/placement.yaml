@@ -16,12 +16,12 @@ occupancy:
 
 # 放置规划
 placement:
-  safety_margin: 1              # 碰撞安全边距
+  safety_margin: 1                # 碰撞安全边距
   yaw_steps: 24                   # yaw 旋转离散步数 (360/24=15°)
   min_surface_area: 50.0          # 最小支撑面面积
   min_support_ratio: 1.0          # 最小支撑比
   occlusion_threshold: 0.3        # 遮挡阈值
-  world_up: [0.0, 0.0, 1.0]      # 世界坐标系上方向
+  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向
 
 # 聚类
 clustering:
@@ -32,7 +32,6 @@ clustering:
 visualization:
   vis_margin_px: 30               # 可见性检查像素边距
   save_vis: true                  # 是否保存可视化
-  save_ply: true                  # 是否保存 PLY 点云
 
 # 计算
 compute:
@@ -41,4 +40,4 @@ compute:
 
 # 输出
 output:
-  dir: "outputs/placement"        # 输出目录
+  dir: "outputs/placement"       # 输出根目录，内部按文件类型分目录

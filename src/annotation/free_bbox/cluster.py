@@ -61,8 +61,8 @@ def cluster_placements(candidates, grid_work, yaw_data,
         eps: float | None DBSCAN 聚类半径（场景单位）；None 表示自适应估计
         min_samples: int DBSCAN 最小样本数
     输出:
-        reps: (K, 3) int 每个簇的代表候选
-        infos: list[dict] 每个簇的详细信息
+        reps: (K, 3) int 每个簇的代表候选，按 free_score 从高到低排序
+        infos: list[dict] 每个簇的详细信息，与 reps 一一对应
     """
     if len(candidates) == 0:
         return np.empty((0, 3), dtype=int), []
@@ -126,5 +126,12 @@ def cluster_placements(candidates, grid_work, yaw_data,
             "used_original_yaw":   bool(used_original_yaw),
         })
 
-    arr = np.array(reps, dtype=int) if reps else np.empty((0, 3), dtype=int)
+    if reps:
+        ranked = sorted(zip(reps, infos),
+                        key=lambda item: item[1]["free_score"],
+                        reverse=True)
+        arr = np.array([item[0] for item in ranked], dtype=int)
+        infos = [item[1] for item in ranked]
+    else:
+        arr = np.empty((0, 3), dtype=int)
     return arr, infos
