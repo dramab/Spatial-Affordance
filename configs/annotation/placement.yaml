@@ -21,7 +21,7 @@ placement:
   min_surface_area: 50.0          # 最小支撑面面积
   min_support_ratio: 1.0          # 最小支撑比
   occlusion_threshold: 0.3        # 遮挡阈值
-  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向
+  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向，同时用于按姿态推断主支撑面
 
 # 聚类
 clustering:

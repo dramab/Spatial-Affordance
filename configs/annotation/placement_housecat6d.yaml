@@ -20,7 +20,7 @@ placement:
   min_surface_area: 50.0
   min_support_ratio: 1.0
   occlusion_threshold: 0.3
-  world_up: [0.0, 0.0, 1.0]
+  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向，同时用于按姿态推断主支撑面
 
 # 聚类
 clustering:

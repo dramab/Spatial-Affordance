@@ -150,6 +150,8 @@ class PlacementResult:
                 "aabb_world": [min_x, min_y, min_z, max_x, max_y, max_z],
                 "free_space_score": int,
             }
+        support_face: dict | None 按姿态 + 重力推断得到的主支撑面信息
+        aligned_pose_world: (4,4) | None 将主支撑面对齐到朝下后的基准姿态
         num_raw_candidates: 过滤前的候选总数
         num_after_stability: 稳定性过滤后数量
         num_after_visibility: 可见性过滤后数量
@@ -159,6 +161,8 @@ class PlacementResult:
     class_name: str
     original_aabb_world: np.ndarray
     placements: list
+    support_face: Optional[dict] = None
+    aligned_pose_world: Optional[np.ndarray] = None
     num_raw_candidates: int = 0
     num_after_stability: int = 0
     num_after_visibility: int = 0

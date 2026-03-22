@@ -6,6 +6,7 @@ src/annotation/bbox3d/bbox_utils.py
 用法:
     from src.annotation.bbox3d.bbox_utils import (
         get_bbox_corners, obb_corners_world, get_contact_face_indices,
+        get_contact_face_info, align_pose_to_contact_face,
     )
 """
 
@@ -60,9 +61,109 @@ CONTACT_FACE_CORNERS = {
     (2, -1): [0, 1, 3, 2],   # min_z 面
 }
 
+CONTACT_FACE_NORMALS = {
+    (0, +1): np.array([1.0, 0.0, 0.0], dtype=np.float64),
+    (0, -1): np.array([-1.0, 0.0, 0.0], dtype=np.float64),
+    (1, +1): np.array([0.0, 1.0, 0.0], dtype=np.float64),
+    (1, -1): np.array([0.0, -1.0, 0.0], dtype=np.float64),
+    (2, +1): np.array([0.0, 0.0, 1.0], dtype=np.float64),
+    (2, -1): np.array([0.0, 0.0, -1.0], dtype=np.float64),
+}
+
+CONTACT_FACE_LABELS = {
+    (0, +1): 'max_x',
+    (0, -1): 'min_x',
+    (1, +1): 'max_y',
+    (1, -1): 'min_y',
+    (2, +1): 'max_z',
+    (2, -1): 'min_z',
+}
+
+
+def _normalize_vector(vec, eps=1e-8):
+    """返回单位向量。"""
+    arr = np.asarray(vec, dtype=np.float64)
+    norm = float(np.linalg.norm(arr))
+    if norm < eps:
+        raise ValueError('Cannot normalize near-zero vector')
+    return arr / norm
+
+
+def _skew_matrix(vec):
+    """构造向量的反对称矩阵。"""
+    x, y, z = np.asarray(vec, dtype=np.float64)
+    return np.array([
+        [0.0, -z,  y],
+        [z,   0.0, -x],
+        [-y,  x,   0.0],
+    ], dtype=np.float64)
+
+
+def rotation_matrix_from_vectors(src_vec, dst_vec, eps=1e-8):
+    """
+    构造将 src_vec 旋转到 dst_vec 的最小旋转矩阵。
+    """
+    src = _normalize_vector(src_vec, eps=eps)
+    dst = _normalize_vector(dst_vec, eps=eps)
+
+    cross = np.cross(src, dst)
+    cross_norm = float(np.linalg.norm(cross))
+    dot = float(np.clip(np.dot(src, dst), -1.0, 1.0))
+
+    if cross_norm < eps:
+        if dot > 0.0:
+            return np.eye(3, dtype=np.float64)
+
+        # 180° 旋转时任选一个与 src 正交的轴。
+        basis = np.zeros(3, dtype=np.float64)
+        basis[int(np.argmin(np.abs(src)))] = 1.0
+        axis = basis - src * np.dot(src, basis)
+        axis = _normalize_vector(axis, eps=eps)
+        K = _skew_matrix(axis)
+        return np.eye(3, dtype=np.float64) + 2.0 * (K @ K)
+
+    K = _skew_matrix(cross)
+    factor = (1.0 - dot) / max(cross_norm * cross_norm, eps)
+    return np.eye(3, dtype=np.float64) + K + factor * (K @ K)
+
+
+def get_contact_face_info(pose_world, E_w2c=None,
+                          world_up=np.array([0.0, 0.0, 1.0])):
+    """
+    根据世界上方向和物体姿态，返回当前最朝下的 canonical 面信息。
+
+    这里不做真实接触检测，而是根据姿态 + 重力方向，
+    选取与世界下方向最一致的一个 bbox 面，作为当前主支撑面。
+    """
+    del E_w2c
+
+    pose_world = np.asarray(pose_world, dtype=np.float64)
+    R_pose = pose_world[:3, :3]
+    down_world = -_normalize_vector(world_up)
+    down_obj = R_pose.T @ down_world
+
+    axis = int(np.argmax(np.abs(down_obj)))
+    sign = +1 if float(down_obj[axis]) >= 0.0 else -1
+    key = (axis, sign)
+
+    normal_obj = CONTACT_FACE_NORMALS[key].copy()
+    normal_world = R_pose @ normal_obj
+
+    return {
+        'axis': axis,
+        'sign': sign,
+        'label': CONTACT_FACE_LABELS[key],
+        'corner_indices': list(CONTACT_FACE_CORNERS[key]),
+        'normal_object': normal_obj,
+        'normal_world': normal_world,
+        'down_object': down_obj,
+        'alignment_score': float(np.dot(
+            _normalize_vector(normal_world), down_world)),
+    }
+
 
 def get_contact_face_indices(pose_world, E_w2c,
-                              world_up=np.array([0.0, 0.0, 1.0])):
+                             world_up=np.array([0.0, 0.0, 1.0])):
     """
     根据世界上方向、外参和物体姿态，动态确定接触面（底面）的 4 个角点索引。
 
@@ -79,12 +180,42 @@ def get_contact_face_indices(pose_world, E_w2c,
     输出:
         list[int] 4 个角点索引
     """
+    info = get_contact_face_info(
+        pose_world, E_w2c=E_w2c, world_up=world_up)
+    return info['corner_indices']
+
+
+def align_pose_to_contact_face(pose_world, bbox3d, E_w2c=None,
+                               world_up=np.array([0.0, 0.0, 1.0])):
+    """
+    将当前主支撑面旋到朝下，返回新的 object→world 姿态。
+
+    旋转绕 bbox 中心进行，这样不会因对齐而引入额外平移偏差。
+    """
+    pose_world = np.asarray(pose_world, dtype=np.float64)
+    bbox3d = np.asarray(bbox3d, dtype=np.float64)
+
+    face_info = get_contact_face_info(
+        pose_world, E_w2c=E_w2c, world_up=world_up)
+    target_down = -_normalize_vector(world_up)
+
     R_pose = pose_world[:3, :3]
-    # 世界下方向在物体坐标系中的表示
-    down_world = -np.asarray(world_up, dtype=np.float64)
-    down_obj = R_pose.T @ down_world
+    R_align = rotation_matrix_from_vectors(
+        face_info['normal_world'], target_down)
+    R_aligned = R_align @ R_pose
 
-    axis = int(np.argmax(np.abs(down_obj)))
-    sign = int(np.sign(down_obj[axis]))
+    bbox_center_obj = (bbox3d[:3] + bbox3d[3:]) / 2.0
+    bbox_center_world = (R_pose @ bbox_center_obj) + pose_world[:3, 3]
 
-    return CONTACT_FACE_CORNERS[(axis, sign)]
+    aligned_pose = pose_world.copy()
+    aligned_pose[:3, :3] = R_aligned
+    aligned_pose[:3, 3] = bbox_center_world - R_aligned @ bbox_center_obj
+
+    info = dict(face_info)
+    info.update({
+        'bbox_center_object': bbox_center_obj,
+        'bbox_center_world': bbox_center_world,
+        'alignment_rotation_world': R_align,
+        'aligned_normal_world': R_aligned @ face_info['normal_object'],
+    })
+    return aligned_pose, info

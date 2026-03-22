@@ -43,6 +43,7 @@ from src.annotation.free_bbox.io_utils import (
     save_placement_samples, save_grid_meta,
 )
 from src.utils.coord_utils import transform_points
+from src.annotation.bbox3d.bbox_utils import align_pose_to_contact_face
 
 
 _REQUIRED_OUTPUT_DIRS = (
@@ -171,6 +172,7 @@ class PlacementPipeline:
         E_w2c = camera.E_w2c
         output_paths = None
         scene_prefix = _make_scene_prefix(scene.scene_id, scene.frame_id)
+        world_up = np.asarray(cfg.world_up, dtype=np.float64)
 
         if output_dir:
             output_paths = _build_output_paths(
@@ -278,6 +280,28 @@ class PlacementPipeline:
                 )
                 continue
 
+            aligned_pose_world, support_face_info = align_pose_to_contact_face(
+                obj.pose_world,
+                obj.bbox3d_canonical,
+                E_w2c=E_w2c,
+                world_up=world_up)
+            support_face_meta = {
+                "axis": int(support_face_info["axis"]),
+                "sign": int(support_face_info["sign"]),
+                "label": support_face_info["label"],
+                "alignment_score": float(support_face_info["alignment_score"]),
+                "normal_object": np.asarray(
+                    support_face_info["normal_object"], dtype=np.float64).tolist(),
+                "normal_world_before_alignment": np.asarray(
+                    support_face_info["normal_world"], dtype=np.float64).tolist(),
+                "normal_world_after_alignment": np.asarray(
+                    support_face_info["aligned_normal_world"],
+                    dtype=np.float64).tolist(),
+            }
+            print(
+                f"    Support face: {support_face_meta['label']} "
+                f"(score={support_face_meta['alignment_score']:.3f})")
+
             # 支撑面检测移除当前物体，避免把物体自身表面误判为最近支撑面
             table_z, surface_mask = detect_support_surfaces(
                 grid_other, vp,
@@ -297,7 +321,7 @@ class PlacementPipeline:
 
             # FFT 碰撞搜索
             candidates, meta, yaw_data = find_table_placements(
-                grid_base, obj.bbox3d_canonical, obj.pose_world, vp,
+                grid_base, obj.bbox3d_canonical, aligned_pose_world, vp,
                 table_z, surface_mask,
                 safety_margin=cfg.safety_margin,
                 yaw_steps=cfg.yaw_steps,
@@ -316,7 +340,7 @@ class PlacementPipeline:
             # 可见性过滤
             candidates = filter_visible_placements(
                 candidates, table_z + 1,
-                obj.bbox3d_canonical, obj.pose_world,
+                obj.bbox3d_canonical, aligned_pose_world,
                 E_w2c, K, camera.img_w, camera.img_h,
                 vp, yaw_data)
             n_vis = len(candidates)
@@ -325,7 +349,7 @@ class PlacementPipeline:
             # 遮挡过滤
             candidates = filter_occluded_placements(
                 candidates, table_z + 1,
-                obj.bbox3d_canonical, obj.pose_world,
+                obj.bbox3d_canonical, aligned_pose_world,
                 depth_buf, K, E_w2c, vp, yaw_data,
                 camera.img_w, camera.img_h,
                 occlusion_threshold=cfg.occlusion_threshold)
@@ -356,6 +380,8 @@ class PlacementPipeline:
                 class_name=name,
                 original_aabb_world=orig_aabb,
                 placements=placements,
+                support_face=support_face_meta,
+                aligned_pose_world=aligned_pose_world.copy(),
                 num_raw_candidates=n_raw,
                 num_after_stability=n_stable,
                 num_after_visibility=n_vis,
@@ -395,6 +421,8 @@ class PlacementPipeline:
                     "canonical_aabb_object": obj.bbox3d_canonical,
                     "original_pose_world": obj.pose_world,
                     "original_aabb_world": res.original_aabb_world,
+                    "support_face": res.support_face,
+                    "aligned_pose_world": res.aligned_pose_world,
                     "placements": res.placements,
                 })
 
@@ -410,6 +438,8 @@ class PlacementPipeline:
                         "canonical_aabb_object": obj.bbox3d_canonical,
                         "original_pose_world": obj.pose_world,
                         "original_aabb_world": res.original_aabb_world,
+                        "support_face": res.support_face,
+                        "aligned_pose_world": res.aligned_pose_world,
                         "center_world": placement["center_world"],
                         "yaw_degrees": placement["yaw_degrees"],
                         "transform_world": placement["transform_world"],
