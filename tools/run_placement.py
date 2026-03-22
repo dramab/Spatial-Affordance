@@ -69,6 +69,12 @@ def build_adapter(cfg):
             mesh_dir=ds_cfg.get("mesh_dir"),
             frame_step=ds_cfg.get("frame_step", 60),
         )
+    if ds_type == "housecat6d":
+        from src.datasets.housecat6d_adapter import HouseCat6DAdapter
+        return HouseCat6DAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 60),
+        )
     else:
         raise ValueError(f"Unknown dataset type: {ds_type}")
 

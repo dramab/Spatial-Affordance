@@ -1,0 +1,42 @@
+# HouseCat6D 放置规划参数配置
+# Adapter 会将原始深度/位姿/尺度统一转换为 cm
+
+# 数据集适配器
+dataset:
+  type: "housecat6d"
+  root_dir: "/data/wenhao.hai/hope-dataset/housecat6D"
+  frame_step: 60
+
+# 占据栅格
+occupancy:
+  voxel_size: 1.0
+  pixel_stride: 2
+  grid_padding: 10.0
+
+# 放置规划
+placement:
+  safety_margin: 2.0
+  yaw_steps: 24
+  min_surface_area: 50.0
+  min_support_ratio: 1.0
+  occlusion_threshold: 0.3
+  world_up: [0.0, 0.0, 1.0]
+
+# 聚类
+clustering:
+  dbscan_eps: null
+  dbscan_min_samples: 1
+
+# 可视化
+visualization:
+  vis_margin_px: 30
+  save_vis: true
+
+# 计算
+compute:
+  use_gpu: false
+  stability_chunk_size: 2000
+
+# 输出
+output:
+  dir: "outputs/housecat6d_placement"
