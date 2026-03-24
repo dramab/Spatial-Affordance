@@ -152,3 +152,40 @@ Text tokens (B,L)    ->  TextEncoder    ->  text_feats (B,L,C)
 | `configs/base/dataset.yaml` | 数据路径、点云采样数、图像分辨率、增强策略 |
 | `configs/experiments/baseline.yaml` | 继承 base，覆盖具体实验参数 |
 | `configs/annotation/auto_label.yaml` | 自动标注流程参数 |
+| `configs/annotation/placement.yaml` | 放置规划流程参数 |
+
+---
+
+## 放置规划模块 (free_bbox)
+
+位于 `src/annotation/free_bbox/`，为场景中每个物体生成合法放置位置（3D bbox）。
+
+### 核心文件
+
+| 文件 | 职责 |
+|---|---|
+| `datatypes.py` | 数据类型定义（SceneData, PlacementConfig 等） |
+| `occupancy.py` | 深度图 → 占据栅格（ray-casting） |
+| `surface.py` | RANSAC 支撑面检测 |
+| `collision.py` | FFT 2D 碰撞检测 |
+| `filters.py` | 稳定性/可见性/遮挡过滤 |
+| `cluster.py` | DBSCAN 聚类 |
+| `pipeline.py` | 完整流程编排 |
+| `state_tracker.py` | **OOM Kill 容错状态管理** |
+
+### OOM Kill 容错机制
+
+批量处理时，如果某帧占用内存过大被 OOM killer 终止，下次运行会自动跳过该帧避免反复 kill。
+
+```bash
+# 查看处理状态
+python tools/run_placement.py --config configs/annotation/placement.yaml --status --output outputs/placement
+
+# 重试之前失败的帧
+python tools/run_placement.py --config configs/annotation/placement.yaml --batch --retry-failed --output outputs/placement
+
+# 强制重新处理所有帧
+python tools/run_placement.py --config configs/annotation/placement.yaml --batch --force --output outputs/placement
+```
+
+详见 [docs/placement_pipeline.md](docs/placement_pipeline.md)。

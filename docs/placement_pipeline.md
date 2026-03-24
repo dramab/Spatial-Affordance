@@ -12,6 +12,7 @@
 4. [接入新数据集](#4-接入新数据集)
 5. [输出标注格式](#5-输出标注格式)
 6. [使用教程](#6-使用教程)
+7. [OOM Kill 容错机制](#7-oom-kill-容错机制)
 
 ---
 
@@ -151,6 +152,7 @@ configs/
 | `pipeline.py` | `PlacementPipeline.run` | 流程编排 |
 | `io_utils.py` | `save_ply`, `save_placement_annotations`, `save_placement_samples` | 结果持久化 |
 | `visualize.py` | `save_placement_vis` | 双面板可视化 |
+| `state_tracker.py` | `mark_processing/completed/failed`, `recover_stale_processing` | OOM Kill 容错状态管理 |
 
 ---
 
@@ -635,3 +637,163 @@ python tools/run_placement.py \
 - 首先验证单位一致性：打印 `scene.depth.max()` 和 `scene.camera.E_c2w[:3, 3]`，两者量级应相同
 - 验证 `pose_world`：将 `bbox3d_canonical` 角点用 `pose_world` 变换后，应与 RGB 图像中物体位置对应
 - 验证 `bbox3d_canonical`：尺寸应与物体实际大小一致（场景单位）
+
+---
+
+## 7. OOM Kill 容错机制
+
+### 7.1 问题背景
+
+在处理大规模场景或高分辨率深度图时，某些帧可能占用过多内存导致服务器 OOM killer 终止程序。传统机制仅通过检查结果文件是否存在来判断是否已完成，但被 kill 的帧不会创建结果文件，下次运行又会重新处理，导致反复被 kill。
+
+### 7.2 解决方案
+
+引入状态跟踪文件（`frame_status.json`）记录每帧的处理状态：
+
+```
+待处理 → [开始处理] → processing
+processing → [成功完成] → completed
+processing → [捕获异常] → failed
+processing → [残留标记] → failed (程序启动时检测)
+```
+
+**状态文件结构**（位于 `output_root/frame_status.json`）：
+
+```json
+{
+  "processing": {"scene_0001": ["0000"]},
+  "completed": {"scene_0001": ["0001"]},
+  "failed": {"scene_0001": ["0002"]},
+  "failed_reasons": {"scene_0001": {"0002": "Process killed (OOM or interrupted)"}}
+}
+```
+
+### 7.3 核心功能
+
+| 功能 | 命令/函数 | 说明 |
+|---|---|---|
+| 自动恢复残留标记 | 启动时自动执行 | 将上次残留 processing 标记移到 failed |
+| 跳过失败帧 | 默认行为 | 批量处理时自动跳过 failed 列表中的帧 |
+| 重试失败帧 | `--retry-failed` | 强制重新处理之前失败的帧 |
+| 查看状态 | `--status` | 显示 completed/processing/failed 统计 |
+| 清除失败状态 | `--clear-failed` | 清空 failed 列表，下次正常处理 |
+
+### 7.4 使用示例
+
+**查看处理状态：**
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --status \
+    --output outputs/placement
+```
+
+输出示例：
+
+```
+Frame Status Summary (outputs/placement):
+  Completed: 150
+  Processing: 0
+  Failed: 3
+
+Failed frames:
+  - scene_0003/0020
+  - scene_0005/0045
+  - scene_0007/0012
+```
+
+**正常批量处理（自动跳过已完成和失败的帧）：**
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch \
+    --output outputs/placement
+```
+
+如果检测到残留 processing 标记（上次被 kill）：
+
+```
+[RECOVER] 2 stale processing frames detected (OOM/interrupted):
+  - scene_0003/0020
+  - scene_0005/0045
+These frames will be skipped unless --retry-failed is used.
+```
+
+**重试之前失败的帧：**
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch --retry-failed \
+    --output outputs/placement
+```
+
+**强制重新处理所有帧（包括已完成和失败的）：**
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch --force \
+    --output outputs/placement
+```
+
+**清除所有失败状态：**
+
+```bash
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --clear-failed \
+    --output outputs/placement
+```
+
+### 7.5 状态文件说明
+
+- **位置**: `outputs/placement/frame_status.json`
+- **线程安全**: 使用文件锁保证多进程并发安全
+- **原子写入**: 通过临时文件+重命名保证写入原子性
+- **自动恢复**: 每次启动时自动将残留 processing 标记移到 failed
+
+### 7.6 手动管理状态（Python API）
+
+```python
+from src.annotation.free_bbox.state_tracker import (
+    mark_processing,
+    mark_completed,
+    mark_failed,
+    recover_stale_processing,
+    is_frame_failed,
+    should_process_frame,
+    get_failed_frames,
+    clear_failed_status,
+)
+
+output_root = "outputs/placement"
+
+# 恢复残留标记
+stale_frames = recover_stale_processing(output_root)
+
+# 检查帧状态
+if is_frame_failed(output_root, "scene_0001", "0000"):
+    print("该帧之前处理失败")
+
+# 判断是否应处理某帧
+if should_process_frame(output_root, "scene_0001", "0000", retry_failed=True):
+    mark_processing(output_root, "scene_0001", "0000")
+    try:
+        # 处理帧...
+        mark_completed(output_root, "scene_0001", "0000")
+    except Exception as e:
+        mark_failed(output_root, "scene_0001", "0000", str(e))
+
+# 获取所有失败帧
+failed = get_failed_frames(output_root)
+
+# 清除特定帧的失败状态
+clear_failed_status(output_root, "scene_0001", "0000")
+# 或清除整个场景
+clear_failed_status(output_root, "scene_0001")
+# 或清除所有
+clear_failed_status(output_root)
+```

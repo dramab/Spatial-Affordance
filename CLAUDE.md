@@ -42,6 +42,30 @@ python tools/run_placement.py \
     --config configs/annotation/placement.yaml \
     --batch --gpu \
     --output outputs/placement
+
+# 查看处理状态（显示 completed/processing/failed 统计）
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --status \
+    --output outputs/placement
+
+# 重试之前失败的帧（包括被 OOM kill 的）
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch --retry-failed \
+    --output outputs/placement
+
+# 强制重新处理所有帧（覆盖已有结果）
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --batch --force \
+    --output outputs/placement
+
+# 清除所有失败状态
+python tools/run_placement.py \
+    --config configs/annotation/placement.yaml \
+    --clear-failed \
+    --output outputs/placement
 ```
 
 ### 训练（Hydra 配置系统）
@@ -114,6 +138,7 @@ PlacementPipeline.run(scene_data)
 | `src/annotation/free_bbox/collision.py` | FFT 碰撞检测，可选 CuPy GPU 加速 |
 | `src/annotation/free_bbox/filters.py` | 可见性/稳定性/遮挡三类过滤器 |
 | `src/annotation/free_bbox/cluster.py` | DBSCAN 聚类，按自由空间分值选代表 |
+| `src/annotation/free_bbox/state_tracker.py` | OOM Kill 容错：状态跟踪文件管理 |
 | `src/datasets/base_adapter.py` | `DatasetAdapter` 抽象基类 |
 | `src/datasets/hope_adapter.py` | HOPE-Video 数据集适配器（深度单位：uint16 mm × 0.98042517 / 10 → cm） |
 | `src/datasets/housecat6d_adapter.py` | HouseCat6D 数据集适配器（深度单位：uint16 mm × 0.1 → cm） |
@@ -155,7 +180,8 @@ outputs/hope_placement/
 ├── point_clouds/{prefix}.ply      # 带色彩点云
 ├── occupancy_grids/{prefix}.npy   # 占据格体素
 ├── grid_meta/{prefix}.json        # 体素格元数据
-└── visualizations/{prefix}.png    # 双视图可视化（2D+3D）
+├── visualizations/{prefix}.png    # 双视图可视化（2D+3D）
+└── frame_status.json              # 处理状态跟踪（processing/completed/failed）
 ```
 ## 代码运行环境
 - 使用conda 激活spatial环境运行代码

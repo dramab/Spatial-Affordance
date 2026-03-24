@@ -9,7 +9,10 @@ tools/run_placement.py
 
 特性:
     - 自动断点续传：batch 模式会自动跳过已完成的样本
+    - OOM Kill 容错：通过状态文件标记失败帧，避免反复处理
     - 使用 --force 强制重新处理所有样本
+    - 使用 --retry-failed 重试之前失败的帧
+    - 使用 --status 查看处理状态摘要
     - 支持 skip_frames 配置跳过特定场景/帧（见 placement.yaml）
 
 用法:
@@ -36,6 +39,24 @@ tools/run_placement.py
     python tools/run_placement.py \
         --config configs/annotation/placement.yaml \
         --batch --force \
+        --output outputs/placement
+
+    # 重试之前失败的帧（包括被 OOM kill 的）
+    python tools/run_placement.py \
+        --config configs/annotation/placement.yaml \
+        --batch --retry-failed \
+        --output outputs/placement
+
+    # 查看处理状态摘要
+    python tools/run_placement.py \
+        --config configs/annotation/placement.yaml \
+        --status \
+        --output outputs/placement
+
+    # 清除所有失败状态（下次正常处理）
+    python tools/run_placement.py \
+        --config configs/annotation/placement.yaml \
+        --clear-failed \
         --output outputs/placement
 
     # 使用 GPU 加速
@@ -66,6 +87,17 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.annotation.free_bbox.datatypes import PlacementConfig
 from src.annotation.free_bbox.pipeline import PlacementPipeline
+from src.annotation.free_bbox.state_tracker import (
+    mark_processing,
+    mark_completed,
+    mark_failed,
+    recover_stale_processing,
+    is_frame_failed,
+    should_process_frame,
+    get_failed_frames,
+    get_frame_status_summary,
+    clear_failed_status,
+)
 
 
 def load_config(config_path):
@@ -217,8 +249,18 @@ def filter_skipped_frames(tasks, skip_frames_config):
 
 def process_task_worker(config_path, scene_path, frame_id,
                         output_root, save_vis, use_gpu):
-    """子进程 worker：独立完成单个 scene/frame 任务。"""
+    """
+    子进程 worker：独立完成单个 scene/frame 任务。
+
+    状态流转:
+        - 开始: mark_processing()
+        - 成功: mark_completed()
+        - 异常: mark_failed()
+    """
     scene_name = Path(scene_path).name
+
+    # 标记开始处理
+    mark_processing(output_root, scene_name, frame_id)
 
     try:
         cfg = load_config(config_path)
@@ -234,12 +276,19 @@ def process_task_worker(config_path, scene_path, frame_id,
             output_root=output_root,
             save_vis=save_vis,
         )
+
+        # 标记完成
+        mark_completed(output_root, scene_name, frame_id)
+
         return {
             "ok": True,
             "scene": scene_name,
             "frame": frame_id,
         }
     except Exception as exc:
+        # 标记失败
+        mark_failed(output_root, scene_name, frame_id, str(exc))
+
         return {
             "ok": False,
             "scene": scene_name,
@@ -249,14 +298,30 @@ def process_task_worker(config_path, scene_path, frame_id,
         }
 
 
-def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis):
-    """串行处理 batch 任务。"""
+def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis, retry_failed=False):
+    """
+    串行处理 batch 任务。
+
+    输入:
+        adapter: 数据集适配器
+        pipeline: 放置规划管道
+        tasks: 任务列表 [(scene_path, frame_id), ...]
+        output_root: 输出根目录
+        save_vis: 是否保存可视化
+        retry_failed: 是否重试失败帧
+    输出:
+        tuple: (成功数, 失败数)
+    """
     success = 0
     failed = 0
 
     for idx, (scene_path, frame_id) in enumerate(tasks, start=1):
         scene_name = Path(scene_path).name
         print(f"\n[Task {idx}/{len(tasks)}] {scene_name}/{frame_id}")
+
+        # 标记开始处理
+        mark_processing(output_root, scene_name, frame_id)
+
         try:
             process_single(
                 adapter,
@@ -266,8 +331,12 @@ def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis):
                 output_root,
                 save_vis,
             )
+            # 标记完成
+            mark_completed(output_root, scene_name, frame_id)
             success += 1
         except Exception as exc:
+            # 标记失败
+            mark_failed(output_root, scene_name, frame_id, str(exc))
             failed += 1
             print(f"[ERROR] {scene_name}/{frame_id}: {exc}")
             print(traceback.format_exc())
@@ -276,7 +345,7 @@ def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis):
 
 
 def process_batch_parallel(config_path, tasks, output_root,
-                           save_vis, use_gpu, workers):
+                           save_vis, use_gpu, workers, retry_failed=False):
     """多进程并发处理 batch 任务。"""
     success = 0
     failed = 0
@@ -346,12 +415,46 @@ def main():
                         help="Number of worker processes for --batch (default: 1)")
     parser.add_argument("--force", action="store_true",
                         help="Force reprocessing all samples even if already completed")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="Retry frames that previously failed (including OOM killed)")
+    parser.add_argument("--status", action="store_true",
+                        help="Show frame status summary and exit")
+    parser.add_argument("--clear-failed", action="store_true",
+                        help="Clear all failed status entries")
     args = parser.parse_args()
 
     if args.workers < 1:
         parser.error("--workers must be >= 1")
 
     cfg = load_config(args.config)
+    output_root = args.output or cfg.get("output", {}).get("dir", "outputs/placement")
+
+    # 处理状态管理命令
+    if args.status:
+        summary = get_frame_status_summary(output_root)
+        print(f"\nFrame Status Summary ({output_root}):")
+        print(f"  Completed: {summary['completed']}")
+        print(f"  Processing: {summary['processing']}")
+        print(f"  Failed: {summary['failed']}")
+        failed_frames = get_failed_frames(output_root)
+        if failed_frames:
+            print(f"\nFailed frames:")
+            for scene_id, frame_id in failed_frames:
+                print(f"  - {scene_id}/{frame_id}")
+        return
+
+    if args.clear_failed:
+        cleared = clear_failed_status(output_root)
+        print(f"Cleared {cleared} failed frame entries from status.")
+        return
+
+    # 启动时恢复残留的 processing 标记（OOM kill 场景）
+    stale_frames = recover_stale_processing(output_root)
+    if stale_frames:
+        print(f"[RECOVER] {len(stale_frames)} stale processing frames detected (OOM/interrupted):")
+        for scene_id, frame_id in stale_frames:
+            print(f"  - {scene_id}/{frame_id}")
+        print(f"These frames will be skipped unless --retry-failed is used.\n")
     adapter = build_adapter(cfg)
     placement_cfg = build_placement_config(cfg)
 
@@ -371,20 +474,29 @@ def main():
         tasks = filter_skipped_frames(tasks, skip_frames_config)
 
         # 自动跳过已完成的样本（除非使用 --force）
+        # 额外跳过失败的帧（除非使用 --retry-failed）
         if not args.force:
             incomplete_tasks = []
-            skipped_count = 0
+            skipped_complete = 0
+            skipped_failed = 0
             for scene_path, frame_id in tasks:
-                if is_sample_complete(output_root, scene_path, frame_id):
-                    skipped_count += 1
-                else:
+                scene_id = Path(scene_path).name
+                if should_process_frame(output_root, scene_id, frame_id, force=False, retry_failed=args.retry_failed):
                     incomplete_tasks.append((scene_path, frame_id))
+                else:
+                    # 判断是已完成还是失败
+                    if is_frame_failed(output_root, scene_id, frame_id):
+                        skipped_failed += 1
+                    else:
+                        skipped_complete += 1
 
-            if skipped_count > 0:
+            if skipped_complete > 0 or skipped_failed > 0:
                 print(
-                    f"[AUTO-SKIP] {skipped_count} samples already completed, "
+                    f"[AUTO-SKIP] {skipped_complete} completed, {skipped_failed} failed, "
                     f"processing {len(incomplete_tasks)} remaining ..."
                 )
+                if skipped_failed > 0 and not args.retry_failed:
+                    print(f"[HINT] Use --retry-failed to process {skipped_failed} failed frames")
             tasks = incomplete_tasks
 
         # 如果没有待处理任务，直接退出
@@ -411,6 +523,7 @@ def main():
                 tasks=tasks,
                 output_root=output_root,
                 save_vis=save_vis,
+                retry_failed=args.retry_failed,
             )
         else:
             success, failed = process_batch_parallel(
@@ -420,6 +533,7 @@ def main():
                 save_vis=save_vis,
                 use_gpu=use_gpu,
                 workers=workers,
+                retry_failed=args.retry_failed,
             )
 
         print(
