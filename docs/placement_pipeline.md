@@ -73,11 +73,12 @@ RGBD 图像 + 物体标注
 
 ### 1.5 FFT 碰撞检测
 
-对每个 yaw 角度（共 `yaw_steps` 个离散角度），将旋转后的物体体素投影到 XY 平面得到 2D footprint，与支撑面上方的障碍物 2D 投影做**互相关（FFT 卷积）**，互相关为 0 的位置即无碰撞。
+对每个 yaw 角度（共 `yaw_steps` 个离散角度），使用纯 yaw 旋转（物体平放在支撑面上，roll=0, pitch=0），将旋转后的物体体素投影到 XY 平面得到 2D footprint，与支撑面上方的障碍物 2D 投影做**互相关（FFT 卷积）**，互相关为 0 的位置即无碰撞。
 
 - 安全边距 `safety_margin`：在碰撞检测前对障碍物做 XY 平面膨胀
 - 输出：所有 (x_voxel, y_voxel, yaw_idx) 三元组候选
 - 当前实现保留目标物体原始占据，因此候选位置不会与物体当前所在位置重合
+- 物体姿态：使用 `compute_placed_transform()` 生成纯 yaw 旋转变换，确保物体底面平行于支撑面
 
 ### 1.6 稳定性过滤
 
@@ -146,7 +147,7 @@ configs/
 | `voxel_utils.py` | `make_voxel_params`, `world_to_voxel`, `voxel_to_world` | 体素坐标系管理 |
 | `grid_ops.py` | `voxelize_obb`, `prepare_grid_base`, `dilate_obstacles_xy` | 栅格操作 |
 | `surface.py` | `detect_support_surfaces` | 支撑面检测（点云 RANSAC 优先，栅格搜索回退） |
-| `collision.py` | `find_table_placements` | FFT 碰撞搜索 |
+| `collision.py` | `find_table_placements` | FFT 碰撞搜索（物体平放姿态） |
 | `filters.py` | `filter_stable/visible/occluded_placements` | 三级过滤 |
 | `cluster.py` | `cluster_placements` | DBSCAN 聚类 |
 | `pipeline.py` | `PlacementPipeline.run` | 流程编排 |

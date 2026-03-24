@@ -4,6 +4,7 @@ src/annotation/free_bbox/collision.py
 FFT 碰撞检测：在 (X, Y, θ) 配置空间中搜索无碰撞放置位置。
 
 通过逐层 2D FFT 卷积检测碰撞，支持可选的 CuPy GPU 加速。
+物体使用纯 yaw 旋转（平放姿态），roll=0, pitch=0。
 
 用法:
     from src.annotation.free_bbox.collision import find_table_placements
@@ -13,7 +14,7 @@ import math
 import numpy as np
 from scipy.signal import fftconvolve
 
-from src.utils.coord_utils import rotation_z_3x3, transform_points
+from src.utils.coord_utils import rotation_z_3x3, transform_points, compute_placed_transform
 from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
 from src.annotation.free_bbox.grid_ops import voxelize_obb, dilate_obstacles_xy
 from src.annotation.free_bbox.voxel_utils import voxel_to_world
@@ -148,12 +149,8 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
     _zero3 = np.zeros(3, dtype=np.float64)
 
     for yaw_idx, angle in enumerate(yaw_angles):
-        R_yaw = rotation_z_3x3(angle)
-
-        T_rot = T_obj2world.copy()
-        T_rot[:3, :3] = R_yaw @ T_obj2world[:3, :3]
-        T_rot[:3, 3] = obj_center_world + R_yaw @ (
-            T_obj2world[:3, 3] - obj_center_world)
+        # 使用纯 yaw 旋转，物体平放在支撑面上
+        T_rot = compute_placed_transform(bbox3d, obj_center_world, angle)
 
         rot_voxels = voxelize_obb(bbox3d, T_rot, vp, grid_shape)
 

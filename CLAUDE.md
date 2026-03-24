@@ -119,7 +119,7 @@ PlacementPipeline.run(scene_data)
     3. prepare_grid_base()         所有物体 OBB 标记为 OCCUPIED
     4. Per-object loop:
         - detect_support_surfaces()  RANSAC 平面拟合 → 选取最近支撑面
-        - find_table_placements()    FFT 2D卷积碰撞检测，遍历 24 个 yaw 角
+        - find_table_placements()    FFT 2D卷积碰撞检测，遍历 24 个 yaw 角（物体平放）
         - filter_stable_placements() 足迹必须在支撑面上
         - filter_visible_placements() OBB 投影必须在图像内
         - filter_occluded_placements() Z-buffer 遮挡检查

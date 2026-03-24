@@ -132,7 +132,7 @@ def _build_saved_placements(scene_prefix, obj_id, bbox3d_canonical,
             "yaw_degrees": float(info["yaw_degrees"]),
             "transform_world": T_placed.tolist(),
             "aabb_world": aabb_world.tolist(),
-            "free_space_score": int(info["free_score"]),
+            "free_space_score": int(info.get("free_score", info.get("centroid_distance", 0))),
         })
 
     return placements

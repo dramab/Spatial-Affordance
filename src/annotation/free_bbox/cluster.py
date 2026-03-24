@@ -2,7 +2,7 @@
 src/annotation/free_bbox/cluster.py
 ------------------------------------
 DBSCAN 聚类：对放置候选在世界坐标 XY 平面聚类，
-每个簇选择周围自由空间最多的代表。
+每个簇选择距离质心最近的代表（即候选框最密集的中心位置）。
 
 用法:
     from src.annotation.free_bbox.cluster import cluster_placements
@@ -49,8 +49,8 @@ def cluster_placements(candidates, grid_work, yaw_data,
     """
     在世界坐标 XY 平面对候选进行 DBSCAN 聚类，每个簇选最优代表。
 
-    代表选择标准：若簇内存在原始朝向 yaw，则优先在原始朝向中选择；
-    否则在所有成员中选择周围自由空间体素数最多的代表。
+    代表选择标准：若簇内存在原始朝向 yaw，则优先在原始朝向中选择距离簇质心最近的；
+    否则在所有成员中选择距离簇质心最近的候选（即候选框最密集的中心位置）。
 
     输入:
         candidates: (N, 3) int [grid_x, grid_y, yaw_index]
@@ -61,7 +61,7 @@ def cluster_placements(candidates, grid_work, yaw_data,
         eps: float | None DBSCAN 聚类半径（场景单位）；None 表示自适应估计
         min_samples: int DBSCAN 最小样本数
     输出:
-        reps: (K, 3) int 每个簇的代表候选，按 free_score 从高到低排序
+        reps: (K, 3) int 每个簇的代表候选，按簇大小从大到小排序
         infos: list[dict] 每个簇的详细信息，与 reps 一一对应
     """
     if len(candidates) == 0:
@@ -80,8 +80,6 @@ def cluster_placements(candidates, grid_work, yaw_data,
                     min_samples=int(min_samples)).fit_predict(pts_w)
     unique = sorted(set(labels) - {-1})
 
-    Gx, Gy, Gz = grid_work.shape
-    rel_voxels_list = yaw_data["rel_voxels"]
     yaw_angles = yaw_data["yaw_angles"]
     original_yaw_index = int(yaw_data.get("original_yaw_index", 0))
 
@@ -91,22 +89,18 @@ def cluster_placements(candidates, grid_work, yaw_data,
         preferred = members[members[:, 2] == original_yaw_index]
         scored_members = preferred if len(preferred) > 0 else members
         used_original_yaw = len(preferred) > 0
-        best_score, best_pos = -1, scored_members[0]
 
-        for pos in scored_members:
-            ix, iy, yi = int(pos[0]), int(pos[1]), int(pos[2])
-            rv = rel_voxels_list[yi]
-            osize = rv.max(axis=0) + 1 if len(rv) > 0 else np.array([1, 1, 1])
-            # 自适应水平缓冲区：约取物体较长边的 25%，
-            # 并限制在一个稳定范围内，避免对大小物体都用同一个固定 pad。
-            pad = int(np.clip(np.ceil(0.25 * max(osize[0], osize[1])), 2, 6))
-            region = grid_work[
-                max(ix - pad, 0): min(ix + osize[0] + pad, Gx),
-                max(iy - pad, 0): min(iy + osize[1] + pad, Gy),
-                max(landing_z - 1, 0): min(landing_z + osize[2] + 1, Gz)]
-            score = int((region == FREE).sum())
-            if score > best_score:
-                best_score, best_pos = score, pos
+        # 计算簇内候选框在世界坐标 XY 平面的质心
+        members_3d = np.column_stack([scored_members[:, :2],
+                                      np.full(len(scored_members), landing_z)])
+        members_world = voxel_to_world(members_3d, vp)[:, :2]
+        centroid = members_world.mean(axis=0)
+
+        # 找到距离质心最近的候选框
+        distances = np.linalg.norm(members_world - centroid, axis=1)
+        best_idx = int(np.argmin(distances))
+        best_pos = scored_members[best_idx]
+        min_distance = float(distances[best_idx])
 
         anchor = np.array([int(best_pos[0]), int(best_pos[1]),
                            int(best_pos[2])], dtype=int)
@@ -120,7 +114,7 @@ def cluster_placements(candidates, grid_work, yaw_data,
             "anchor_world":        voxel_to_world(anchor_3d, vp).tolist(),
             "yaw_index":           int(anchor[2]),
             "yaw_degrees":         float(np.degrees(yaw_angles[anchor[2]])),
-            "free_score":          best_score,
+            "centroid_distance":   min_distance,
             "dbscan_eps":          effective_eps,
             "dbscan_min_samples":  int(min_samples),
             "used_original_yaw":   bool(used_original_yaw),
@@ -128,7 +122,7 @@ def cluster_placements(candidates, grid_work, yaw_data,
 
     if reps:
         ranked = sorted(zip(reps, infos),
-                        key=lambda item: item[1]["free_score"],
+                        key=lambda item: item[1]["size"],
                         reverse=True)
         arr = np.array([item[0] for item in ranked], dtype=int)
         infos = [item[1] for item in ranked]
