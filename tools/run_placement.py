@@ -7,6 +7,11 @@ tools/run_placement.py
 从 YAML 配置文件加载参数，通过数据集适配器加载场景数据，
 运行 PlacementPipeline 生成放置结果。
 
+特性:
+    - 自动断点续传：batch 模式会自动跳过已完成的样本
+    - 使用 --force 强制重新处理所有样本
+    - 支持 skip_frames 配置跳过特定场景/帧（见 placement.yaml）
+
 用法:
     # 处理单个场景的单帧
     python tools/run_placement.py \
@@ -15,7 +20,7 @@ tools/run_placement.py
         --frame 0000 \
         --output outputs/placement
 
-    # 串行批量处理所有场景
+    # 串行批量处理所有场景（自动跳过已完成）
     python tools/run_placement.py \
         --config configs/annotation/placement.yaml \
         --batch \
@@ -27,11 +32,23 @@ tools/run_placement.py
         --batch --workers 8 \
         --output outputs/placement
 
+    # 强制重新处理所有样本（覆盖已有结果）
+    python tools/run_placement.py \
+        --config configs/annotation/placement.yaml \
+        --batch --force \
+        --output outputs/placement
+
     # 使用 GPU 加速
     python tools/run_placement.py \
         --config configs/annotation/placement.yaml \
         --batch --gpu \
         --output outputs/placement
+
+配置示例 (placement.yaml):
+    dataset:
+      skip_frames:                  # 跳过特定场景的特定帧
+        scene_0001: ["0000", "0001"]  # 跳过 scene_0001 的 0000 和 0001 帧
+        scene_0002: ["all"]           # 跳过 scene_0002 的所有帧
 """
 
 import argparse
@@ -129,6 +146,25 @@ def process_single(adapter, pipeline, scene_path, frame_id,
     return results
 
 
+def is_sample_complete(output_root: str, scene_path: str, frame_id: str) -> bool:
+    """
+    检查样本是否已完成（核心文件 placements/{prefix}.json 存在）。
+
+    输入:
+        output_root: 输出根目录
+        scene_path: 场景路径
+        frame_id: 帧ID
+    输出:
+        bool: 是否已完成
+    """
+    from src.annotation.free_bbox.pipeline import _make_scene_prefix
+
+    scene_id = Path(scene_path).name
+    prefix = _make_scene_prefix(scene_id, frame_id)
+    placement_path = Path(output_root) / "placements" / f"{prefix}.json"
+    return placement_path.exists()
+
+
 def expand_batch_tasks(scenes):
     """将 adapter.list_scenes() 结果展开成单帧任务列表。"""
     tasks = []
@@ -136,6 +172,47 @@ def expand_batch_tasks(scenes):
         for frame_id in frame_ids:
             tasks.append((scene_path, frame_id))
     return tasks
+
+
+def filter_skipped_frames(tasks, skip_frames_config):
+    """
+    根据配置过滤掉需要跳过的场景/帧。
+
+    输入:
+        tasks: 任务列表 [(scene_path, frame_id), ...]
+        skip_frames_config: 跳过配置，格式为 {scene_name: [frame_id, ...]}
+                           支持 "all" 或 "*" 表示跳过该场景所有帧
+    输出:
+        过滤后的任务列表
+    """
+    if not skip_frames_config:
+        return tasks
+
+    filtered_tasks = []
+    skipped_count = 0
+
+    for scene_path, frame_id in tasks:
+        scene_name = Path(scene_path).name
+
+        # 检查是否需要跳过
+        should_skip = False
+        if scene_name in skip_frames_config:
+            skip_list = skip_frames_config[scene_name]
+            # 支持 "all" 或 "*" 跳过所有帧
+            if "all" in skip_list or "*" in skip_list:
+                should_skip = True
+            elif frame_id in skip_list:
+                should_skip = True
+
+        if should_skip:
+            skipped_count += 1
+        else:
+            filtered_tasks.append((scene_path, frame_id))
+
+    if skipped_count > 0:
+        print(f"[SKIP CONFIG] {skipped_count} tasks skipped by skip_frames config.")
+
+    return filtered_tasks
 
 
 def process_task_worker(config_path, scene_path, frame_id,
@@ -267,6 +344,8 @@ def main():
                         help="Skip visualization")
     parser.add_argument("--workers", type=int, default=1,
                         help="Number of worker processes for --batch (default: 1)")
+    parser.add_argument("--force", action="store_true",
+                        help="Force reprocessing all samples even if already completed")
     args = parser.parse_args()
 
     if args.workers < 1:
@@ -286,6 +365,33 @@ def main():
     if args.batch:
         scenes = adapter.list_scenes()
         tasks = expand_batch_tasks(scenes)
+
+        # 根据 skip_frames 配置过滤任务
+        skip_frames_config = cfg.get("dataset", {}).get("skip_frames")
+        tasks = filter_skipped_frames(tasks, skip_frames_config)
+
+        # 自动跳过已完成的样本（除非使用 --force）
+        if not args.force:
+            incomplete_tasks = []
+            skipped_count = 0
+            for scene_path, frame_id in tasks:
+                if is_sample_complete(output_root, scene_path, frame_id):
+                    skipped_count += 1
+                else:
+                    incomplete_tasks.append((scene_path, frame_id))
+
+            if skipped_count > 0:
+                print(
+                    f"[AUTO-SKIP] {skipped_count} samples already completed, "
+                    f"processing {len(incomplete_tasks)} remaining ..."
+                )
+            tasks = incomplete_tasks
+
+        # 如果没有待处理任务，直接退出
+        if len(tasks) == 0:
+            print("[DONE] All samples already processed. Use --force to reprocess.")
+            return
+
         workers = min(args.workers, max(len(tasks), 1))
 
         print(

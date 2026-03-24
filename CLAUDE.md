@@ -65,6 +65,7 @@ python scripts/run_annotation.py \
 ```bash
 pytest tests/
 pytest tests/test_dataset.py  # 单文件
+pytest tests/test_dataset.py::test_specific_function  # 单函数
 ```
 
 ---
@@ -86,7 +87,7 @@ pytest tests/test_dataset.py  # 单文件
 ### 放置规划流程（6步）
 
 ```
-HopeAdapter.load_scene() → SceneData
+Adapter.load_scene() → SceneData
     ↓
 PlacementPipeline.run(scene_data)
     1. depth_to_pointcloud()       深度图 → 世界坐标系彩色点云
@@ -115,10 +116,15 @@ PlacementPipeline.run(scene_data)
 | `src/annotation/free_bbox/cluster.py` | DBSCAN 聚类，按自由空间分值选代表 |
 | `src/datasets/base_adapter.py` | `DatasetAdapter` 抽象基类 |
 | `src/datasets/hope_adapter.py` | HOPE-Video 数据集适配器（深度单位：uint16 mm × 0.98042517 / 10 → cm） |
+| `src/datasets/housecat6d_adapter.py` | HouseCat6D 数据集适配器（深度单位：uint16 mm × 0.1 → cm） |
 
 ### 数据集适配器扩展
 
 新增数据集只需继承 `DatasetAdapter` 并实现 `load_scene()` 和 `list_scenes()`，所有单位转换和文件格式处理都封装在适配器内。
+
+**切换数据集配置**：
+- HOPE-Video: `configs/annotation/placement.yaml` (`dataset.type: hope`)
+- HouseCat6D: `configs/annotation/placement_housecat6d.yaml` (`dataset.type: housecat6d`)
 
 ### 并行处理
 
@@ -132,11 +138,11 @@ FFT 碰撞检测（`collision.py`）：有 CuPy 时自动使用 `cupyx.scipy.sig
 
 ## 数据规格
 
-- 深度图单位：存储为 uint16 (mm)，HopeAdapter 转换为 cm
-- 外参平移：存储为 m，HopeAdapter 转换为 cm
+- 深度图单位：存储为 uint16 (mm)，适配器统一转换为 cm
+- 外参平移：存储为 m，适配器统一转换为 cm
 - 体素大小默认：1.0 cm
 - Yaw 搜索步数：24 步（15°/步）
-- 安全边距：1 cm
+- 安全边距：2 cm
 
 ---
 
@@ -151,3 +157,5 @@ outputs/hope_placement/
 ├── grid_meta/{prefix}.json        # 体素格元数据
 └── visualizations/{prefix}.png    # 双视图可视化（2D+3D）
 ```
+## 代码运行环境
+- 使用conda 激活spatial环境运行代码

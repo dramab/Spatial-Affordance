@@ -54,8 +54,8 @@ def is_fully_visible(bbox3d, pose_cam, fx, fy, cx, cy, img_w, img_h,
     if not in_view or depth_buffer is None:
         return bool(in_view)
 
-    u_int = np.round(uv[:, 0]).astype(int)
-    v_int = np.round(uv[:, 1]).astype(int)
+    u_int = np.clip(np.round(uv[:, 0]).astype(int), 0, img_w - 1)
+    v_int = np.clip(np.round(uv[:, 1]).astype(int), 0, img_h - 1)
     buf_z = depth_buffer[v_int, u_int]
     occluded = np.isfinite(buf_z) & (Z > buf_z + depth_margin)
     return bool(not np.any(occluded))

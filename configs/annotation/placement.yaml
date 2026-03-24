@@ -6,7 +6,11 @@ dataset:
   type: "hope"                    # 数据集类型: hope / custom
   root_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/hope_video" # 数据根目录
   mesh_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/full" # mesh 目录（HOPE 需要）
-  frame_step: 60                  # 帧采样步长
+  frame_step: 20                  # 帧采样步长
+  skip_frames:                  # 可选：跳过特定场景的特定帧
+    scene_0006: ["0040","0060","0100"]  # 跳过 scene_0006 的 0040 
+    scene_0008: ["0000"]           # 跳过 scene_0008 的 0000 帧
+  #   scene_0002: ["all"]           # 跳过 scene_0002 的所有帧
 
 # 占据栅格
 occupancy:
