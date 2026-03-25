@@ -5,7 +5,7 @@
 dataset:
   type: "housecat6d"
   root_dir: "/data/wenhao.hai/housecat6D/housecat6D_trainset"
-  frame_step: 60
+  frame_step: 10
 
 # 占据栅格
 occupancy:
@@ -15,12 +15,14 @@ occupancy:
 
 # 放置规划
 placement:
-  safety_margin: 2.0
-  yaw_steps: 24
-  min_surface_area: 50.0
-  min_support_ratio: 1.0
-  occlusion_threshold: 0.3
-  world_up: [0.0, 0.0, 1.0]
+  safety_margin: 3                # 碰撞安全边距
+  yaw_steps: 24                   # yaw 旋转离散步数 (360/24=15°)
+  min_surface_area: 50.0          # 最小支撑面面积
+  min_support_ratio: 1.0          # 最小支撑比
+  occlusion_threshold: 0.2        # 遮挡阈值
+  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向
+  preserve_orientation: true      # 是否保留原始合理姿态
+  orientation_threshold_deg: 5 # 姿态判断容差（度）
 
 # 聚类
 clustering:
@@ -39,4 +41,4 @@ compute:
 
 # 输出
 output:
-  dir: "outputs/housecat6d_placement"
+  dir: "outputs/housecat6d_placement10"

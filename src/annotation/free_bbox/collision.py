@@ -14,7 +14,10 @@ import math
 import numpy as np
 from scipy.signal import fftconvolve
 
-from src.utils.coord_utils import rotation_z_3x3, transform_points, compute_placed_transform
+from src.utils.coord_utils import (
+    rotation_z_3x3, transform_points, compute_placed_transform,
+    analyze_pose_orientation, compute_placed_transform_with_orientation
+)
 from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
 from src.annotation.free_bbox.grid_ops import voxelize_obb, dilate_obstacles_xy
 from src.annotation.free_bbox.voxel_utils import voxel_to_world
@@ -82,15 +85,21 @@ def _compute_collision_slice(obstacle, obj_mask, landing_z, use_gpu=False):
 def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
                           table_z, surface_mask_2d,
                           safety_margin=0.5, yaw_steps=24,
-                          use_gpu=False):
+                          use_gpu=False,
+                          preserve_orientation=True,
+                          orientation_threshold_deg=15.0):
     """
     在 (X, Y, θ) 配置空间中搜索无碰撞放置位置。
 
     算法:
-        1. 对每个 yaw 角度，旋转物体并体素化
-        2. 膨胀障碍物（安全边距）
-        3. FFT 卷积检测碰撞
-        4. 收集所有无碰撞位置
+        1. 分析原始姿态是否属于平放或竖立的合理姿态
+        2. 若姿态合理，则保留原始 roll/pitch，只扫描 yaw
+        3. 若姿态不合理（如斜插、斜靠），则丢弃原始 roll/pitch，
+           回退到平放 + yaw 扫描的标准放置姿态
+        4. 对每个 yaw 角度，旋转物体并体素化
+        5. 膨胀障碍物（安全边距）
+        6. FFT 卷积检测碰撞
+        7. 收集所有无碰撞位置
 
     输入:
         grid_work: (Gx, Gy, Gz) uint8 工作栅格（目标物体已移除）
@@ -102,11 +111,28 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         safety_margin: float 安全边距（场景单位）
         yaw_steps: int yaw 旋转离散步数
         use_gpu: bool 是否使用 GPU
+        preserve_orientation: bool 是否保留原始合理姿态
+        orientation_threshold_deg: float 姿态判断容差（度）
+            - 平放要求 roll/pitch 接近 0°
+            - 竖立要求一个轴接近 ±90° 且另一轴接近 0°
+            - 不满足时按倾斜姿态处理
     输出:
         candidates: (N, 3) int 候选位置 [grid_x, grid_y, yaw_index]
         meta: dict 搜索统计信息
         yaw_data: dict 每个 yaw 角度的旋转数据（供后续过滤使用）
     """
+    # 分析原始姿态
+    pose_info = None
+    if preserve_orientation:
+        pose_info = analyze_pose_orientation(
+            T_obj2world,
+            bbox3d,
+            flat_threshold_deg=orientation_threshold_deg,
+            upright_threshold_deg=orientation_threshold_deg
+        )
+        if not pose_info["is_reasonable"]:
+            pose_info = None
+
     vs = float(vp["voxel_size"])
     grid_shape = np.array(grid_work.shape)
     Gx, Gy, Gz = grid_shape
@@ -149,8 +175,16 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
     _zero3 = np.zeros(3, dtype=np.float64)
 
     for yaw_idx, angle in enumerate(yaw_angles):
-        # 使用纯 yaw 旋转，物体平放在支撑面上
-        T_rot = compute_placed_transform(bbox3d, obj_center_world, angle)
+        # 根据姿态分析结果选择旋转方式
+        if pose_info is not None:
+            # 保留原始 roll/pitch，只改变 yaw
+            T_rot = compute_placed_transform_with_orientation(
+                bbox3d, obj_center_world,
+                pose_info["roll"], pose_info["pitch"], angle
+            )
+        else:
+            # 纠正为平放姿态
+            T_rot = compute_placed_transform(bbox3d, obj_center_world, angle)
 
         rot_voxels = voxelize_obb(bbox3d, T_rot, vp, grid_shape)
 
@@ -210,6 +244,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         "T_rotated":    yaw_T_rotated,
         "footprints":   yaw_footprints,
         "original_yaw_index": 0,
+        "pose_info":    pose_info,
     }
 
     meta = {

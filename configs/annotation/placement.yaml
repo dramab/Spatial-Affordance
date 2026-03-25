@@ -6,7 +6,7 @@ dataset:
   type: "hope"                    # 数据集类型: hope / custom
   root_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/hope_video" # 数据根目录
   mesh_dir: "/data/jiajun.xie/Spatial-Affordance/data/hope/full" # mesh 目录（HOPE 需要）
-  frame_step: 20                  # 帧采样步长
+  frame_step: 5                  # 帧采样步长
   skip_frames:                  # 可选：跳过特定场景的特定帧
     scene_0006: ["0040","0060","0100"]  # 跳过 scene_0006 的 0040 
     scene_0008: ["0000"]           # 跳过 scene_0008 的 0000 帧
@@ -26,6 +26,8 @@ placement:
   min_support_ratio: 1.0          # 最小支撑比
   occlusion_threshold: 0.3        # 遮挡阈值
   world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向
+  preserve_orientation: true      # 是否保留原始合理姿态
+  orientation_threshold_deg: 5 # 姿态判断容差（度）
 
 # 聚类
 clustering:

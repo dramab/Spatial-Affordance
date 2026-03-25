@@ -129,6 +129,8 @@ class PlacementConfig:
     world_up: tuple = (0.0, 0.0, 1.0)
     vis_margin_px: int = 30
     stability_chunk_size: int = 2000
+    preserve_orientation: bool = True
+    orientation_threshold_deg: float = 15.0
 
 
 @dataclass

@@ -301,7 +301,9 @@ class PlacementPipeline:
                 table_z, surface_mask,
                 safety_margin=cfg.safety_margin,
                 yaw_steps=cfg.yaw_steps,
-                use_gpu=self.use_gpu)
+                use_gpu=self.use_gpu,
+                preserve_orientation=cfg.preserve_orientation,
+                orientation_threshold_deg=cfg.orientation_threshold_deg)
             n_raw = meta["valid_raw"]
             print(f"    Raw candidates: {n_raw}")
 

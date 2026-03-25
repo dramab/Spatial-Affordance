@@ -541,6 +541,9 @@ def main():
             f"total={len(tasks)}"
         )
 
+        if failed > 0:
+            sys.exit(1)
+
     elif args.scene and args.frame:
         process_single(adapter, pipeline, args.scene, args.frame,
                        output_root, save_vis)
