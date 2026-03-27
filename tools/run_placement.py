@@ -9,7 +9,7 @@ tools/run_placement.py
 
 特性:
     - 自动断点续传：batch 模式会自动跳过已完成的样本
-    - OOM Kill 容错：通过状态文件标记失败帧，避免反复处理
+    - OOM Kill 容错：通过每样本 running/failed 标记恢复中断帧，避免反复处理
     - 使用 --force 强制重新处理所有样本
     - 使用 --retry-failed 重试之前失败的帧
     - 使用 --status 查看处理状态摘要
@@ -93,6 +93,7 @@ from src.annotation.free_bbox.state_tracker import (
     mark_failed,
     recover_stale_processing,
     is_frame_failed,
+    is_sample_complete,
     should_process_frame,
     get_failed_frames,
     get_frame_status_summary,
@@ -176,25 +177,6 @@ def process_single(adapter, pipeline, scene_path, frame_id,
                    if len(r.placements) > 0)
     print(f"\nDone: {n_placed}/{n_objects} objects have valid placements.")
     return results
-
-
-def is_sample_complete(output_root: str, scene_path: str, frame_id: str) -> bool:
-    """
-    检查样本是否已完成（核心文件 placements/{prefix}.json 存在）。
-
-    输入:
-        output_root: 输出根目录
-        scene_path: 场景路径
-        frame_id: 帧ID
-    输出:
-        bool: 是否已完成
-    """
-    from src.annotation.free_bbox.pipeline import _make_scene_prefix
-
-    scene_id = Path(scene_path).name
-    prefix = _make_scene_prefix(scene_id, frame_id)
-    placement_path = Path(output_root) / "placements" / f"{prefix}.json"
-    return placement_path.exists()
 
 
 def expand_batch_tasks(scenes):
@@ -445,16 +427,16 @@ def main():
 
     if args.clear_failed:
         cleared = clear_failed_status(output_root)
-        print(f"Cleared {cleared} failed frame entries from status.")
+        print(f"Cleared {cleared} failed frame markers from status directory.")
         return
 
-    # 启动时恢复残留的 processing 标记（OOM kill 场景）
+    # 启动时恢复残留的 running 标记（OOM kill 场景）
     stale_frames = recover_stale_processing(output_root)
     if stale_frames:
-        print(f"[RECOVER] {len(stale_frames)} stale processing frames detected (OOM/interrupted):")
+        print(f"[RECOVER] {len(stale_frames)} stale running frames detected (OOM/interrupted):")
         for scene_id, frame_id in stale_frames:
             print(f"  - {scene_id}/{frame_id}")
-        print(f"These frames will be skipped unless --retry-failed is used.\n")
+        print("These frames will be skipped unless --retry-failed is used.\n")
     adapter = build_adapter(cfg)
     placement_cfg = build_placement_config(cfg)
 
@@ -484,8 +466,10 @@ def main():
                 if should_process_frame(output_root, scene_id, frame_id, force=False, retry_failed=args.retry_failed):
                     incomplete_tasks.append((scene_path, frame_id))
                 else:
-                    # 判断是已完成还是失败
-                    if is_frame_failed(output_root, scene_id, frame_id):
+                    # 优先以核心结果文件是否完整作为完成依据
+                    if is_sample_complete(output_root, scene_id, frame_id):
+                        skipped_complete += 1
+                    elif is_frame_failed(output_root, scene_id, frame_id):
                         skipped_failed += 1
                     else:
                         skipped_complete += 1

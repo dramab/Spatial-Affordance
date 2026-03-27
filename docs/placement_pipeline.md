@@ -171,7 +171,7 @@ configs/
 | `pipeline.py` | `PlacementPipeline.run` | 流程编排 |
 | `io_utils.py` | `save_ply`, `save_placement_annotations`, `save_placement_samples` | 结果持久化 |
 | `visualize.py` | `save_placement_vis` | 双面板可视化 |
-| `state_tracker.py` | `mark_processing/completed/failed`, `recover_stale_processing` | OOM Kill 容错状态管理 |
+| `state_tracker.py` | `mark_processing/completed/failed`, `recover_stale_processing`, `is_sample_complete` | 每样本状态标记与结果完备性检查 |
 
 ---
 
@@ -663,41 +663,61 @@ python tools/run_placement.py \
 
 ### 7.1 问题背景
 
-在处理大规模场景或高分辨率深度图时，某些帧可能占用过多内存导致服务器 OOM killer 终止程序。传统机制仅通过检查结果文件是否存在来判断是否已完成，但被 kill 的帧不会创建结果文件，下次运行又会重新处理，导致反复被 kill。
+在处理大规模场景或高分辨率深度图时，某些帧可能占用过多内存导致服务器 OOM killer 终止程序。
+如果仅根据单个结果文件判断是否完成，可能出现两类问题：
 
-### 7.2 解决方案
+1. 样本处理中途被 kill，只留下半套结果文件，下次被误判为已完成
+2. 多进程共享同一个全局状态文件时，容易出现状态覆盖和漏记
 
-引入状态跟踪文件（`frame_status.json`）记录每帧的处理状态：
+### 7.2 当前方案
+
+当前实现不再使用全局 `frame_status.json`，而是改为**每个样本独立状态文件**：
 
 ```
-待处理 → [开始处理] → processing
-processing → [成功完成] → completed
-processing → [捕获异常] → failed
-processing → [残留标记] → failed (程序启动时检测)
+outputs/placement/
+├── status/
+│   ├── running/
+│   │   └── scene_0001_0000.json
+│   └── failed/
+│       └── scene_0003_0020.json
+├── placements/
+├── samples/
+├── point_clouds/
+├── occupancy_grids/
+└── grid_meta/
 ```
 
-**状态文件结构**（位于 `output_root/frame_status.json`）：
+状态含义如下：
 
-```json
-{
-  "processing": {"scene_0001": ["0000"]},
-  "completed": {"scene_0001": ["0001"]},
-  "failed": {"scene_0001": ["0002"]},
-  "failed_reasons": {"scene_0001": {"0002": "Process killed (OOM or interrupted)"}}
-}
+- `status/running/<sample>.json`：该样本正在处理
+- `status/failed/<sample>.json`：该样本上次处理失败，或处理中被 kill
+- `placements/`、`samples/`、`point_clouds/`、`occupancy_grids/`、`grid_meta/` 下的核心文件全部存在：该样本视为完成
+
+注意：`visualizations/` 属于可选输出，且文件数量与有效 placement 数量相关，因此**不作为完成判定条件**。
+
+### 7.3 状态流转
+
+```
+待处理 → [开始处理] → running
+running → [核心结果完整落盘] → completed
+running → [捕获异常] → failed
+running → [程序被 kill，重启时恢复] → failed
 ```
 
-### 7.3 核心功能
+其中 `completed` 不单独写状态文件，而是由核心结果文件是否齐全决定。
+
+### 7.4 核心行为
 
 | 功能 | 命令/函数 | 说明 |
 |---|---|---|
-| 自动恢复残留标记 | 启动时自动执行 | 将上次残留 processing 标记移到 failed |
-| 跳过失败帧 | 默认行为 | 批量处理时自动跳过 failed 列表中的帧 |
-| 重试失败帧 | `--retry-failed` | 强制重新处理之前失败的帧 |
-| 查看状态 | `--status` | 显示 completed/processing/failed 统计 |
-| 清除失败状态 | `--clear-failed` | 清空 failed 列表，下次正常处理 |
+| 自动恢复残留 running | 启动时自动执行 | 将上次残留 running 标记转为 failed；若核心结果已完整，只清理 running 标记 |
+| 跳过已完成帧 | 默认行为 | 只有当核心结果文件全部存在时才视为完成 |
+| 跳过失败帧 | 默认行为 | 批量处理时自动跳过 failed 标记中的帧 |
+| 重试失败帧 | `--retry-failed` | 重新处理之前失败或被 kill 的帧 |
+| 查看状态 | `--status` | 显示 completed/running/failed 统计 |
+| 清除失败状态 | `--clear-failed` | 清空 `status/failed/` 下的标记 |
 
-### 7.4 使用示例
+### 7.5 使用示例
 
 **查看处理状态：**
 
@@ -731,10 +751,10 @@ python tools/run_placement.py \
     --output outputs/placement
 ```
 
-如果检测到残留 processing 标记（上次被 kill）：
+如果检测到残留 running 标记：
 
 ```
-[RECOVER] 2 stale processing frames detected (OOM/interrupted):
+[RECOVER] 2 stale running frames detected (OOM/interrupted):
   - scene_0003/0020
   - scene_0005/0045
 These frames will be skipped unless --retry-failed is used.
@@ -767,14 +787,14 @@ python tools/run_placement.py \
     --output outputs/placement
 ```
 
-### 7.5 状态文件说明
+### 7.6 状态目录说明
 
-- **位置**: `outputs/placement/frame_status.json`
-- **线程安全**: 使用文件锁保证多进程并发安全
-- **原子写入**: 通过临时文件+重命名保证写入原子性
-- **自动恢复**: 每次启动时自动将残留 processing 标记移到 failed
+- **位置**: `outputs/placement/status/`
+- **并发特性**: 每个样本独立状态文件，不再依赖共享全局 JSON
+- **完成判定**: 以核心结果文件是否全部存在为准
+- **自动恢复**: 每次启动时自动将残留 running 标记恢复为 failed，或在核心结果齐全时直接清理 running 标记
 
-### 7.6 手动管理状态（Python API）
+### 7.7 手动管理状态（Python API）
 
 ```python
 from src.annotation.free_bbox.state_tracker import (
@@ -783,6 +803,7 @@ from src.annotation.free_bbox.state_tracker import (
     mark_failed,
     recover_stale_processing,
     is_frame_failed,
+    is_sample_complete,
     should_process_frame,
     get_failed_frames,
     clear_failed_status,
@@ -797,14 +818,18 @@ stale_frames = recover_stale_processing(output_root)
 if is_frame_failed(output_root, "scene_0001", "0000"):
     print("该帧之前处理失败")
 
+# 结果是否完整
+if is_sample_complete(output_root, "scene_0001", "0000"):
+    print("该帧核心输出已全部生成")
+
 # 判断是否应处理某帧
 if should_process_frame(output_root, "scene_0001", "0000", retry_failed=True):
     mark_processing(output_root, "scene_0001", "0000")
     try:
         # 处理帧...
         mark_completed(output_root, "scene_0001", "0000")
-    except Exception as e:
-        mark_failed(output_root, "scene_0001", "0000", str(e))
+    except Exception as exc:
+        mark_failed(output_root, "scene_0001", "0000", str(exc))
 
 # 获取所有失败帧
 failed = get_failed_frames(output_root)
