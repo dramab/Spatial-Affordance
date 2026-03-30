@@ -199,17 +199,21 @@ class PlacementPipeline:
 
         vp = make_voxel_params(grid_min, vs)
 
+        # ── Step 3: 物体体素化 ────────────────────────────────────────────
+        print("[3/6] Voxelizing objects ...")
+        grid_base = prepare_grid_base(grid, scene.objects, vp)
+
         if output_paths:
-            np.save(output_paths["occupancy_grid_npy"], grid)
+            np.save(output_paths["occupancy_grid_npy"], grid_base)
             counts = {
-                "free": int((grid == FREE).sum()),
-                "occupied": int((grid == OCCUPIED).sum()),
-                "unknown": int((grid == UNKNOWN).sum()),
+                "free": int((grid_base == FREE).sum()),
+                "occupied": int((grid_base == OCCUPIED).sum()),
+                "unknown": int((grid_base == UNKNOWN).sum()),
             }
             save_grid_meta(
                 output_paths["grid_meta"],
                 vp,
-                grid.shape,
+                grid_base.shape,
                 voxel_counts=counts,
                 extra={
                     "scene_id": scene.scene_id,
@@ -218,14 +222,10 @@ class PlacementPipeline:
                 })
             save_occupancy_ply(
                 output_paths["occupancy_grid_ply"],
-                grid,
+                grid_base,
                 grid_min,
                 vs,
                 states=[FREE, OCCUPIED])
-
-        # ── Step 3: 物体体素化 ────────────────────────────────────────────
-        print("[3/6] Voxelizing objects ...")
-        grid_base = prepare_grid_base(grid, scene.objects, vp)
 
         # ── Step 4 & 5: 逐物体放置规划 ──────────────────────────────────
         print("[4/6] Planning placements ...")
