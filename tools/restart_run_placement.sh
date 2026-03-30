@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-
+# example: MEMORY_MAX=70G bash tools/restart_run_placement.sh
 set -u
 
 CMD=(
 python tools/run_placement.py \
         --config configs/annotation/placement_housecat6d.yaml \
-        --batch --workers 4 \
-        --output outputs/housecat6d_placement10
-)
+        --batch --workers 8 \
+        --output outputs/housecat6d
+        )
 
 RESTART_DELAY="${RESTART_DELAY:-5}"
 MEMORY_MAX="${MEMORY_MAX:-}"

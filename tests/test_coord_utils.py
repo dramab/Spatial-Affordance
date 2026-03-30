@@ -7,6 +7,8 @@ tests/test_coord_utils.py
 - test_analyze_pose_orientation_flat_pose：验证平放姿态会被识别为合理
 - test_analyze_pose_orientation_upright_pose：验证真正竖立姿态会被识别为合理
 - test_analyze_pose_orientation_rejects_tilted_remote_pose：验证斜插遥控器这类姿态不会被误判为竖立
+- test_analyze_pose_orientation_accepts_axis_aligned_middle_axis_pose：
+  验证中间尺度轴竖直的姿态也会被识别为可保留姿态
 
 用法：
     pytest tests/test_coord_utils.py -v
@@ -160,6 +162,43 @@ def test_analyze_pose_orientation_accepts_flat_bottle_sample():
 
     assert int(info["flat_axis_index"]) == 0
     assert int(info["vertical_axis_index"]) == 0
+    assert bool(info["is_axis_aligned"]) is True
     assert bool(info["is_flat"]) is True
+    assert bool(info["is_upright"]) is False
+    assert bool(info["is_reasonable"]) is True
+
+
+def test_analyze_pose_orientation_accepts_axis_aligned_middle_axis_pose():
+    """
+    验证当中间尺度轴竖直时，姿态仍会被识别为可保留姿态。
+
+    输入:
+        无，内部使用样本 cup-green_actys 的原始旋转矩阵与 canonical AABB
+    输出:
+        无，通过断言验证结果
+    """
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, :3] = np.array([
+        [-0.36858265550763186, -0.01955667608560278, 0.9293892416417485],
+        [0.9291522909979096, 0.02310052084795846, 0.36897477701041403],
+        [-0.028685295750162727, 0.9995418462260788, 0.00965667907149146],
+    ], dtype=np.float64)
+    bbox = np.array([
+        -5.507149919867516, -4.461599886417389, -4.048449918627739,
+        5.507149919867516, 4.461599886417389, 4.048449918627739,
+    ], dtype=np.float64)
+
+    info = analyze_pose_orientation(
+        pose,
+        bbox,
+        flat_threshold_deg=5.0,
+        upright_threshold_deg=5.0,
+    )
+
+    assert int(info["vertical_axis_index"]) == 1
+    assert int(info["flat_axis_index"]) == 2
+    assert int(info["upright_axis_index"]) == 0
+    assert bool(info["is_axis_aligned"]) is True
+    assert bool(info["is_flat"]) is False
     assert bool(info["is_upright"]) is False
     assert bool(info["is_reasonable"]) is True

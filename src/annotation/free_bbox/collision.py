@@ -92,7 +92,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
     在 (X, Y, θ) 配置空间中搜索无碰撞放置位置。
 
     算法:
-        1. 分析原始姿态是否属于平放或竖立的合理姿态
+        1. 分析原始姿态是否属于轴对齐稳定姿态
         2. 若姿态合理，则保留原始 roll/pitch，只扫描 yaw
         3. 若姿态不合理（如斜插、斜靠），则丢弃原始 roll/pitch，
            回退到平放 + yaw 扫描的标准放置姿态
@@ -113,8 +113,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         use_gpu: bool 是否使用 GPU
         preserve_orientation: bool 是否保留原始合理姿态
         orientation_threshold_deg: float 姿态判断容差（度）
-            - 平放要求 roll/pitch 接近 0°
-            - 竖立要求一个轴接近 ±90° 且另一轴接近 0°
+            - 只要任一局部轴与世界竖直方向足够对齐，即视为可保留姿态
             - 不满足时按倾斜姿态处理
     输出:
         candidates: (N, 3) int 候选位置 [grid_x, grid_y, yaw_index]

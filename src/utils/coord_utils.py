@@ -142,7 +142,7 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
                              flat_threshold_deg: float = 15.0,
                              upright_threshold_deg: float = 15.0) -> dict:
     """
-    分析物体姿态是否为合理的平放或竖立姿态。
+    分析物体姿态是否为可直接保留的轴对齐稳定姿态。
 
     输入:
         T_obj2world: (4, 4) object→world 变换矩阵
@@ -156,15 +156,17 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
             - vertical_axis_alignment: 该局部轴与世界竖直方向的对齐程度
             - flat_axis_index: canonical 最短轴索引
             - upright_axis_index: canonical 最长轴索引
+            - is_axis_aligned: 是否存在局部轴与世界竖直方向足够对齐
             - is_flat: 是否为平放姿态
             - is_upright: 是否为竖立姿态
-            - is_reasonable: 是否为合理姿态（平放或竖立）
+            - is_reasonable: 是否为合理姿态（轴对齐稳定姿态）
 
     判定规则:
         - 先找到最接近世界竖直方向的局部轴
-        - 平放: 该轴是 canonical 最短轴，且与竖直方向夹角足够小
-        - 竖立: 该轴是 canonical 最长轴，且与竖直方向夹角足够小
-        - 其余姿态视为倾斜/不合理姿态
+        - 若该轴与竖直方向夹角足够小，则视为轴对齐稳定姿态，可保留原始 roll/pitch
+        - 若该轴恰好是 canonical 最短轴，则额外标记为平放
+        - 若该轴恰好是 canonical 最长轴，则额外标记为竖立
+        - 若没有任何局部轴足够接近竖直方向，则视为倾斜/不合理姿态
 
     说明:
         当姿态被判为不合理时，放置规划阶段不会保留原始 roll/pitch，
@@ -186,11 +188,13 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
 
     flat_alignment_threshold = float(np.cos(np.deg2rad(flat_threshold_deg)))
     upright_alignment_threshold = float(np.cos(np.deg2rad(upright_threshold_deg)))
+    axis_aligned_threshold = min(flat_alignment_threshold, upright_alignment_threshold)
 
     is_flat = (vertical_axis_index == flat_axis_index and
                vertical_axis_alignment >= flat_alignment_threshold)
     is_upright = (vertical_axis_index == upright_axis_index and
                   vertical_axis_alignment >= upright_alignment_threshold)
+    is_axis_aligned = vertical_axis_alignment >= axis_aligned_threshold
 
     return {
         "roll": roll,
@@ -200,9 +204,10 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
         "vertical_axis_alignment": vertical_axis_alignment,
         "flat_axis_index": flat_axis_index,
         "upright_axis_index": upright_axis_index,
+        "is_axis_aligned": is_axis_aligned,
         "is_flat": is_flat,
         "is_upright": is_upright,
-        "is_reasonable": is_flat or is_upright
+        "is_reasonable": is_axis_aligned
     }
 
 def compute_placed_transform_with_orientation(bbox3d_canonical: np.ndarray,
