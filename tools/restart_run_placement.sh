@@ -4,9 +4,8 @@ set -u
 
 CMD=(
 python tools/run_placement.py \
-        --config configs/annotation/placement_housecat6d.yaml \
-        --batch --workers 8 \
-        --output outputs/housecat6d
+        --config configs/annotation/placement.yaml \
+        --batch --workers 1 \
         )
 
 RESTART_DELAY="${RESTART_DELAY:-5}"
