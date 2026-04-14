@@ -10,11 +10,17 @@ image_backbone:
   freeze: false
 
 pc_backbone:
-  type: "pointnet2"         # pointnet2 | pointtransformer
-  in_channels: 6            # xyz + rgb
-  out_channels: 256
-  num_points: 1024          # 下采样后保留点数
-  num_layers: 4
+  type: "voxelnet"
+  unit: "cm"
+  voxel_size_cm: [2.0, 2.0, 2.0]
+  point_cloud_range_cm: [-80.0, -80.0, -10.0, 80.0, 80.0, 120.0]
+  max_points_per_voxel: 32
+  max_voxels: 20000
+  input_feature_dim: 6
+  svfe_hidden_channels: 32
+  svfe_out_channels: 128
+  cml_channels: [128, 128, 128]
+  return_dense: true
 
 text_encoder:
   type: "bert-base-uncased"

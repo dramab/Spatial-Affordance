@@ -11,8 +11,6 @@ setup(
     install_requires=[
         "torch>=2.1.0",
         "torchvision>=0.16.0",
-        "hydra-core>=1.3.0",
-        "omegaconf>=2.3.0",
         "transformers>=4.35.0",
         "open3d>=0.17.0",
         "einops>=0.7.0",
@@ -21,5 +19,10 @@ setup(
         "scikit-learn>=1.3.0",
         "opencv-python>=4.8.0",
         "Pillow>=10.0.0",
+        "matplotlib>=3.7.0",
+        "pyyaml>=6.0",
+        "trimesh>=4.0.0",
+        "openai>=1.0.0",
+        "pytest>=7.4.0",
     ],
 )

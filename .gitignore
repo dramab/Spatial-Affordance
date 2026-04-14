@@ -34,6 +34,8 @@ env/
 wandb/
 runs/
 lightning_logs/
+*.out
+wrong_label.txt
 
 # 模型权重（大文件）
 *.pth
@@ -44,3 +46,4 @@ lightning_logs/
 # 系统文件
 .DS_Store
 Thumbs.db
+.codex
