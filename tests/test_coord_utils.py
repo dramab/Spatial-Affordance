@@ -9,6 +9,10 @@ tests/test_coord_utils.py
 - test_analyze_pose_orientation_rejects_tilted_remote_pose：验证斜插遥控器这类姿态不会被误判为竖立
 - test_analyze_pose_orientation_accepts_axis_aligned_middle_axis_pose：
   验证中间尺度轴竖直的姿态也会被识别为可保留姿态
+- test_camera_aligned_scene_normalizer_roundtrip_points：
+  验证点云在 world 与 normalized 之间可逆
+- test_camera_aligned_box_normalization_roundtrip：
+  验证 7D box 在 aligned 与 normalized 之间可逆
 
 用法：
     pytest tests/test_coord_utils.py -v
@@ -18,6 +22,12 @@ import numpy as np
 
 from src.utils.coord_utils import (
     analyze_pose_orientation,
+    build_camera_scene_normalizer,
+    denormalize_box_to_aligned,
+    denormalize_points_to_aligned,
+    denormalize_points_to_world,
+    normalize_box_from_aligned,
+    normalize_points_world,
     rotation_matrix_from_euler_zyx,
 )
 
@@ -202,3 +212,55 @@ def test_analyze_pose_orientation_accepts_axis_aligned_middle_axis_pose():
     assert bool(info["is_flat"]) is False
     assert bool(info["is_upright"]) is False
     assert bool(info["is_reasonable"]) is True
+
+
+def test_camera_scene_normalizer_roundtrip_points():
+    """
+    验证点云在 world、camera、normalized 之间变换可逆。
+
+    输入:
+        无，内部构造点云与相机外参
+    输出:
+        无，通过断言验证结果
+    """
+    points_world = np.array([
+        [10.0, 0.0, 100.0],
+        [14.0, 4.0, 110.0],
+        [6.0, -2.0, 96.0],
+        [12.0, 1.0, 104.0],
+    ], dtype=np.float64)
+    E_w2c = np.eye(4, dtype=np.float64)
+    E_w2c[:3, 3] = np.array([2.0, -3.0, 5.0], dtype=np.float64)
+
+    meta = build_camera_scene_normalizer(points_world, E_w2c, center_mode="bbox")
+    points_norm = normalize_points_world(points_world, meta)
+    points_camera = denormalize_points_to_aligned(points_norm, meta)
+    restored_world = denormalize_points_to_world(points_norm, meta)
+    expected_camera = (meta.T_world_to_camera @ np.hstack([
+        points_world,
+        np.ones((points_world.shape[0], 1), dtype=np.float64),
+    ]).T).T[:, :3]
+
+    assert np.allclose(restored_world, points_world, atol=1e-6)
+    assert np.allclose(points_camera, expected_camera, atol=1e-6)
+    assert float(meta.scene_scale) > 0.0
+    assert np.max(np.abs(points_norm)) <= 1.0 + 1e-6
+
+
+def test_camera_aligned_box_normalization_roundtrip():
+    """
+    验证 aligned 7D box 做单标量归一化后可以准确恢复。
+
+    输入:
+        无，内部构造一个 camera_aligned 7D box
+    输出:
+        无，通过断言验证结果
+    """
+    box_aligned = np.array([1.5, -2.0, 8.0, 4.0, 6.0, 3.0, 0.25], dtype=np.float64)
+    scene_center = np.array([0.5, -1.0, 10.0], dtype=np.float64)
+    scene_scale = 8.0
+
+    box_norm = normalize_box_from_aligned(box_aligned, scene_center, scene_scale)
+    restored_box = denormalize_box_to_aligned(box_norm, scene_center, scene_scale)
+
+    assert np.allclose(restored_box, box_aligned, atol=1e-6)

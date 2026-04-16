@@ -8,6 +8,8 @@ tests/test_multimodal_model.py
   验证三模态输入可以被统一编码并输出单 query 3D BBox
 - test_multimodal_model_requires_at_least_one_modality：
   验证所有模态都为空时会抛出错误
+- test_multimodal_model_denormalizes_boxes_with_scene_meta：
+  验证传入场景中心和尺度后，模型会额外输出去归一化 box
 
 用法：
     pytest tests/test_multimodal_model.py -v
@@ -181,6 +183,7 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
     assert outputs["memory_mask"].dtype == torch.bool
     assert outputs["decoder_tokens"].shape == (2, 1, 32)
     assert outputs["pred_boxes"].shape == (2, 1, 7)
+    assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
     assert torch.all(outputs["pred_boxes"][..., 3:6] > 0)
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
@@ -213,3 +216,47 @@ def test_multimodal_model_requires_at_least_one_modality(monkeypatch):
         assert "at least one modality input" in str(exc)
     else:
         raise AssertionError("expected ValueError when all modality inputs are None")
+
+
+def test_multimodal_model_denormalizes_boxes_with_scene_meta(monkeypatch):
+    """
+    作用：验证传入场景标准化元数据后，模型会输出去归一化 box。
+
+    输入：
+        无，内部构造 mock 文本主干与场景标准化参数
+    输出：
+        无，通过断言验证结果
+    """
+    monkeypatch.setattr(
+        "src.models.encoders.text_encoder.AutoTokenizer.from_pretrained",
+        lambda _: _FakeTokenizer(),
+    )
+    monkeypatch.setattr(
+        "src.models.encoders.text_encoder.AutoModel.from_pretrained",
+        lambda _: _FakeModel(),
+    )
+
+    model = MultimodalModel(_make_model_cfg())
+    points_xyz = _make_points_batch()
+    images = torch.randint(0, 255, (2, 3, 64, 64), dtype=torch.uint8)
+    text_inputs = [
+        "place the mug on the table",
+        "move the bowl beside the chair",
+    ]
+    box_norm_meta = {
+        "scene_center": torch.tensor([[10.0, 20.0, 30.0], [1.0, 2.0, 3.0]], dtype=torch.float32),
+        "scene_scale": torch.tensor([5.0, 2.0], dtype=torch.float32),
+    }
+
+    outputs = model(
+        points_xyz=points_xyz,
+        images=images,
+        text_inputs=text_inputs,
+        box_norm_meta=box_norm_meta,
+    )
+
+    assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
+    assert outputs["pred_boxes"].shape == (2, 1, 7)
+    assert not torch.allclose(outputs["pred_boxes"], outputs["pred_boxes_norm"])
+    expected_sizes = outputs["pred_boxes_norm"][..., 3:6] * box_norm_meta["scene_scale"].view(2, 1, 1)
+    assert torch.allclose(outputs["pred_boxes"][..., 3:6], expected_sizes, atol=1e-5)

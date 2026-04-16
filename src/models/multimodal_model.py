@@ -99,6 +99,46 @@ class MultimodalModel(nn.Module):
             out_dim=int(_cfg_get(bbox3d_head_cfg, "out_dim", 7)),
         )
 
+    @staticmethod
+    def _denormalize_boxes(
+            pred_boxes_norm: torch.Tensor,
+            box_norm_meta: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        """
+        作用：根据场景中心和平移尺度恢复 camera_aligned 坐标系下的 box。
+
+        输入：
+            pred_boxes_norm: Tensor(B, Q, 7) normalized box
+            box_norm_meta: dict，至少包含:
+                - scene_center: Tensor(B, 3)
+                - scene_scale: Tensor(B,) 或 Tensor(B, 1)
+        输出：
+            Tensor(B, Q, 7) 去归一化后的 camera_aligned box
+        """
+        if "scene_center" not in box_norm_meta or "scene_scale" not in box_norm_meta:
+            raise ValueError("box_norm_meta must contain scene_center and scene_scale")
+
+        scene_center = box_norm_meta["scene_center"].to(
+            device=pred_boxes_norm.device,
+            dtype=pred_boxes_norm.dtype,
+        )
+        scene_scale = box_norm_meta["scene_scale"].to(
+            device=pred_boxes_norm.device,
+            dtype=pred_boxes_norm.dtype,
+        )
+        if scene_center.ndim != 2 or scene_center.shape[-1] != 3:
+            raise ValueError("scene_center must have shape (B, 3)")
+        if scene_scale.ndim == 1:
+            scene_scale = scene_scale.unsqueeze(-1)
+        if scene_scale.ndim != 2 or scene_scale.shape[-1] != 1:
+            raise ValueError("scene_scale must have shape (B,) or (B, 1)")
+        if scene_center.shape[0] != pred_boxes_norm.shape[0] or scene_scale.shape[0] != pred_boxes_norm.shape[0]:
+            raise ValueError("box_norm_meta batch size must match pred_boxes_norm")
+
+        denormalized = pred_boxes_norm.clone()
+        denormalized[..., :3] = denormalized[..., :3] * scene_scale.unsqueeze(1) + scene_center.unsqueeze(1)
+        denormalized[..., 3:6] = denormalized[..., 3:6] * scene_scale.unsqueeze(1)
+        return denormalized
+
     def _encode_point_inputs(
             self,
             points_xyz: Optional[torch.Tensor],
@@ -162,7 +202,8 @@ class MultimodalModel(nn.Module):
             points_xyz: Optional[torch.Tensor] = None,
             point_feats: Optional[torch.Tensor] = None,
             images: Optional[torch.Tensor] = None,
-            text_inputs: Optional[Sequence[str] | Mapping[str, torch.Tensor]] = None) -> dict[str, Any]:
+            text_inputs: Optional[Sequence[str] | Mapping[str, torch.Tensor]] = None,
+            box_norm_meta: Optional[Mapping[str, torch.Tensor]] = None) -> dict[str, Any]:
         """
         作用：执行统一多模态编码、解码与 3D BBox 回归。
 
@@ -171,8 +212,11 @@ class MultimodalModel(nn.Module):
             point_feats: Tensor(B, N, F) 点特征
             images: Tensor(B, 3, H, W) RGB 图像
             text_inputs: list[str] 或 tokenizer 输出字典
+            box_norm_meta: dict，可选场景去归一化参数，至少包含
+                scene_center 与 scene_scale
         输出：
-            dict，包含 point/image/text 编码结果、memory、decoder_tokens、pred_boxes
+            dict，包含 point/image/text 编码结果、memory、decoder_tokens、
+            pred_boxes_norm 与 pred_boxes
         """
         point_dict = self._encode_point_inputs(points_xyz, point_feats)
         image_dict = self._encode_image_inputs(images)
@@ -187,7 +231,11 @@ class MultimodalModel(nn.Module):
             memory=memory_dict["memory"],
             memory_mask=memory_dict["memory_mask"],
         )
-        pred_boxes = self.bbox3d_head(decoder_dict["decoder_tokens"])
+        pred_boxes_norm = self.bbox3d_head(decoder_dict["decoder_tokens"])
+        pred_boxes = (
+            self._denormalize_boxes(pred_boxes_norm, box_norm_meta)
+            if box_norm_meta is not None else pred_boxes_norm
+        )
 
         return {
             "point_outputs": point_dict,
@@ -199,5 +247,6 @@ class MultimodalModel(nn.Module):
             "modality_lengths": memory_dict["modality_lengths"],
             "decoder_tokens": decoder_dict["decoder_tokens"],
             "query_embed": decoder_dict["query_embed"],
+            "pred_boxes_norm": pred_boxes_norm,
             "pred_boxes": pred_boxes,
         }
