@@ -75,7 +75,7 @@ class PCBackbone(nn.Module):
         input_feature_dim = int(_cfg_get(cfg, "input_feature_dim", 6))
         svfe_hidden_channels = int(_cfg_get(cfg, "svfe_hidden_channels", 32))
         svfe_out_channels = int(_cfg_get(cfg, "svfe_out_channels", 128))
-        cml_channels = tuple(_cfg_get(cfg, "cml_channels", (128, 128, 128)))
+        cml_channels = tuple(_cfg_get(cfg, "cml_channels", (128, 256, 256)))
         return_dense = bool(_cfg_get(cfg, "return_dense", True))
 
         self.backbone = VoxelNetEncoder(

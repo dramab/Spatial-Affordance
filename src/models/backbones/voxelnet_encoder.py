@@ -506,7 +506,7 @@ class VoxelNetEncoder(nn.Module):
             input_feature_dim: int = 6,
             svfe_hidden_channels: int = 32,
             svfe_out_channels: int = 128,
-            cml_channels: Sequence[int] = (128, 128, 128),
+            cml_channels: Sequence[int] = (128, 256, 256),
             return_dense: bool = True):
         super().__init__()
         self.grid_spec = build_voxel_grid_spec(voxel_size_cm, point_cloud_range_cm)

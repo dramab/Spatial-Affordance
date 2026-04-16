@@ -10,6 +10,8 @@ tests/test_voxelnet_encoder.py
   验证尺度变大时占据体素范围同步增大
 - test_flatten_voxel_grid_for_transformer_matches_valid_mask：
   验证 dense grid 展平后的 token 数与 valid mask 一致
+- test_build_padded_voxel_tokens_returns_batch_first_layout：
+  验证 batch-first 体素 token 的 padding、mask 和位置坐标正确
 - test_pc_backbone_voxelnet_instantiation：验证统一 backbone 入口可实例化
 
 用法：
@@ -21,6 +23,7 @@ import torch
 from src.models.backbones import (
     PCBackbone,
     VoxelNetEncoder,
+    build_padded_voxel_tokens,
     flatten_voxel_grid_for_transformer,
     voxelize_points,
 )
@@ -196,3 +199,51 @@ def test_pc_backbone_voxelnet_instantiation():
     assert "dense_voxel_feats" in outputs
     assert "grid_meta" in outputs
     assert outputs["dense_voxel_feats"].shape[1] == 32
+
+
+def test_build_padded_voxel_tokens_returns_batch_first_layout():
+    """
+    验证 batch-first 体素 token 输出具备正确的 padding 与 mask。
+
+    输入:
+        无，内部构造两个点云样本
+    输出:
+        无，通过断言验证结果
+    """
+    encoder = VoxelNetEncoder(
+        voxel_size_cm=(5.0, 5.0, 5.0),
+        point_cloud_range_cm=(-20.0, -20.0, -20.0, 20.0, 20.0, 20.0),
+        max_points_per_voxel=8,
+        max_voxels=256,
+        input_feature_dim=6,
+        svfe_hidden_channels=16,
+        svfe_out_channels=32,
+        cml_channels=(32,),
+    )
+    points_xyz = torch.cat([
+        _make_points_batch(4, scale=1.0),
+        _make_points_batch(4, scale=0.6),
+    ], dim=0)
+    outputs = encoder(points_xyz)
+
+    token_dict = build_padded_voxel_tokens(
+        dense_voxel_feats=outputs["dense_voxel_feats"],
+        valid_mask=outputs["valid_mask"],
+        grid_meta=outputs["grid_meta"],
+    )
+
+    assert token_dict["tokens"].shape[0] == 2
+    assert token_dict["token_mask"].shape[:2] == token_dict["tokens"].shape[:2]
+    assert token_dict["token_pos"].shape[-1] == 3
+    assert token_dict["token_coords_cm"].shape[-1] == 3
+    assert token_dict["sparse_coords"].shape[-1] == 4
+    assert token_dict["token_counts"].shape == (2,)
+    assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] <= 1.0 + 1e-6)
+    assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] >= -1.0 - 1e-6)
+
+    for batch_idx in range(2):
+        valid_count = int(token_dict["token_counts"][batch_idx].item())
+        assert int(token_dict["token_mask"][batch_idx].sum().item()) == valid_count
+        if valid_count < token_dict["tokens"].shape[1]:
+            assert not torch.any(token_dict["token_mask"][batch_idx, valid_count:])
+            assert torch.all(token_dict["sparse_coords"][batch_idx, valid_count:] == -1)

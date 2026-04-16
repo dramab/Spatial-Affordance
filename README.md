@@ -31,11 +31,11 @@ Spatial-Affordance/
 │   │   ├── grounding_model.py    # 顶层模型，串联所有子模块
 │   │   ├── backbones/
 │   │   │   ├── __init__.py
-│   │   │   ├── image_backbone.py # ResNet/ViT 图像特征提取
+│   │   │   ├── image_backbone.py # ResNet 图像特征提取 + token 导出
 │   │   │   └── pc_backbone.py    # PointNet++ 点云特征提取
 │   │   ├── encoders/
 │   │   │   ├── __init__.py
-│   │   │   └── text_encoder.py   # BERT 文本编码
+│   │   │   └── text_encoder.py   # RoBERTa 文本编码
 │   │   ├── fusion/
 │   │   │   ├── __init__.py
 │   │   │   └── multimodal_fusion.py  # 三模态 cross-attention 融合
@@ -91,11 +91,11 @@ Spatial-Affordance/
 ## 核心数据流
 
 ```
-RGB Image (B,3,H,W)  ->  ImageBackbone  ->  img_feats (B,C,H',W')
+RGB Image (B,3,H,W)  ->  ImageBackbone  ->  img_tokens (B,T_img,C)
 Point Cloud (B,N,6)  ->  PCBackbone     ->  pc_feats (B,M,C), pc_xyz (B,M,3)
-Text tokens (B,L)    ->  TextEncoder    ->  text_feats (B,L,C)
+Text tokens (B,L)    ->  TextEncoder    ->  text_tokens (B,L,C)
 
-[img_feats, pc_feats, text_feats]
+[img_tokens, pc_feats, text_tokens]
     -> MultimodalFusion (cross-attention，文字作 query)
     -> fused_feats (B,M,C)
     -> BBox3DHead
