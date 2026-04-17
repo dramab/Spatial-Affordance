@@ -535,17 +535,13 @@ class VoxelNetEncoder(nn.Module):
         输入:
             points_xyz: Tensor(B, N, 3) 点云坐标
             point_feats: Tensor(B, N, F) 可选附加特征
-        输出:
-            dict，至少包含：
-                dense_voxel_feats: Tensor(B, C, D, H, W)
-                    经 3D 卷积后的稠密体素特征，空体素位置为 0
-                valid_mask: BoolTensor(B, 1, D, H, W)
-                    标记稠密网格中哪些体素包含有效点
-                sparse_voxel_feats: Tensor(K, C)
-                    从稠密网格中按有效体素坐标提取的 CML 后稀疏特征，K 为有效体素总数
-                sparse_coords: LongTensor(K, 4)
-                    有效体素在稠密网格中的索引，顺序为 (batch_idx, z, y, x)
-                grid_meta: dict 元信息
+    输出:
+        dict，至少包含：
+            dense_voxel_feats: Tensor(B, C, D, H, W)
+                经 3D 卷积后的稠密体素特征，空体素位置为 0
+            valid_mask: BoolTensor(B, 1, D, H, W)
+                标记稠密网格中哪些体素包含有效点
+            grid_meta: dict 元信息
                     包含 voxel_size、point_cloud_range、grid_shape_dhw
         """
         voxel_dict = voxelize_points(
@@ -569,22 +565,9 @@ class VoxelNetEncoder(nn.Module):
         dense_feats = self.cml(dense_input)
 
         valid_mask = dense_input.abs().sum(dim=1, keepdim=True) > 0
-        sparse_after_cml = dense_feats[
-            voxel_dict["voxel_coords"][:, 0].long(),
-            :,
-            voxel_dict["voxel_coords"][:, 1].long(),
-            voxel_dict["voxel_coords"][:, 2].long(),
-            voxel_dict["voxel_coords"][:, 3].long(),
-        ] if voxel_dict["voxel_coords"].shape[0] > 0 else dense_feats.new_zeros((0, dense_feats.shape[1]))
-
         outputs: Dict[str, torch.Tensor | Dict[str, object]] = {
             "dense_voxel_feats": dense_feats if self.return_dense else dense_input,
             "valid_mask": valid_mask,
-            "sparse_voxel_feats": sparse_after_cml,
-            "sparse_coords": voxel_dict["voxel_coords"],
-            "voxel_num_points": voxel_dict["voxel_num_points"],
-            "points_per_batch": voxel_dict["points_per_batch"],
-            "dropped_points": voxel_dict["dropped_points"],
             "grid_meta": {
                 "voxel_size": self.grid_spec.voxel_size,
                 "point_cloud_range": self.grid_spec.point_cloud_range,

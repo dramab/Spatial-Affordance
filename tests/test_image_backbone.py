@@ -18,7 +18,7 @@ from src.models.backbones import ImageBackbone
 
 def test_image_backbone_outputs_feature_map_and_tokens():
     """
-    作用：验证图像编码器会同时输出特征图和 token 接口。
+    作用：验证图像编码器会输出融合所需的 token 接口。
 
     输入：
         无，内部构造随机图像 batch
@@ -34,11 +34,9 @@ def test_image_backbone_outputs_feature_map_and_tokens():
 
     outputs = backbone(images)
 
-    assert outputs["feature_map"].shape == (2, 128, 7, 7)
     assert outputs["tokens"].shape == (2, 49, 128)
     assert outputs["token_mask"].shape == (2, 49)
     assert outputs["token_pos"].shape == (2, 49, 2)
-    assert outputs["feat_hw"] == (7, 7)
     assert torch.all(outputs["token_mask"])
 
 

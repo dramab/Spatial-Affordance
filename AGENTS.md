@@ -24,3 +24,6 @@ Recent history follows short prefixed subjects such as `feat:` and `style:`. Kee
 
 ## Agent-Specific Instructions
 Before coding, align on the implementation approach. When adding a CLI script or new flags, include a concrete usage example in the file docstring and in the PR description.
+
+## 运行时的虚拟环境
+采用spatial这个虚拟环境运行代码

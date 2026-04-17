@@ -256,17 +256,11 @@ def test_build_padded_voxel_tokens_returns_batch_first_layout():
     assert token_dict["tokens"].shape[0] == 2
     assert token_dict["token_mask"].shape[:2] == token_dict["tokens"].shape[:2]
     assert token_dict["token_pos"].shape[-1] == 3
-    assert token_dict["token_coords"].shape[-1] == 3
-    assert token_dict["sparse_coords"].shape[-1] == 4
-    assert token_dict["token_counts"].shape == (2,)
     assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] <= 1.0 + 1e-6)
     assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] >= -1.0 - 1e-6)
-    assert torch.all(token_dict["token_coords"][token_dict["token_mask"]] <= 1.0 + 1e-6)
-    assert torch.all(token_dict["token_coords"][token_dict["token_mask"]] >= -1.0 - 1e-6)
 
     for batch_idx in range(2):
-        valid_count = int(token_dict["token_counts"][batch_idx].item())
+        valid_count = int(token_dict["token_mask"][batch_idx].sum().item())
         assert int(token_dict["token_mask"][batch_idx].sum().item()) == valid_count
         if valid_count < token_dict["tokens"].shape[1]:
             assert not torch.any(token_dict["token_mask"][batch_idx, valid_count:])
-            assert torch.all(token_dict["sparse_coords"][batch_idx, valid_count:] == -1)

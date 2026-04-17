@@ -17,7 +17,7 @@ src/models/backbones/image_backbone.py
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Mapping
 
 import torch
 from torch import nn
@@ -26,22 +26,7 @@ from torchvision.models import (
     ResNet50_Weights,
     ResNet101_Weights,
 )
-
-
-def _cfg_get(cfg: Mapping[str, Any] | object, key: str, default: Any = None) -> Any:
-    """
-    作用：从 dict 或对象中统一读取配置。
-
-    输入：
-        cfg: 配置对象
-        key: str 配置键
-        default: 默认值
-    输出：
-        配置值
-    """
-    if isinstance(cfg, Mapping):
-        return cfg.get(key, default)
-    return getattr(cfg, key, default)
+from src.models.common import cfg_get
 
 
 class ImageBackbone(nn.Module):
@@ -52,20 +37,17 @@ class ImageBackbone(nn.Module):
         images: Tensor(B, 3, H, W)，支持 uint8 或 float
     输出：
         dict，包含：
-        - feature_map: Tensor(B, C, H', W')
         - tokens: Tensor(B, H'*W', C)
         - token_mask: BoolTensor(B, H'*W')
         - token_pos: Tensor(B, H'*W', 2)，归一化二维坐标
-        - feat_hw: tuple[int, int]
     """
 
     def __init__(self, cfg: Mapping[str, Any] | object):
         super().__init__()
-        self.cfg = cfg
-        backbone_type = str(_cfg_get(cfg, "type", "resnet50")).lower()
-        pretrained = bool(_cfg_get(cfg, "pretrained", True))
-        freeze = bool(_cfg_get(cfg, "freeze", False))
-        out_channels = int(_cfg_get(cfg, "out_channels", 256))
+        backbone_type = str(cfg_get(cfg, "type", "resnet50")).lower()
+        pretrained = bool(cfg_get(cfg, "pretrained", True))
+        freeze = bool(cfg_get(cfg, "freeze", False))
+        out_channels = int(cfg_get(cfg, "out_channels", 256))
 
         backbone, backbone_out_channels = self._build_backbone(
             backbone_type=backbone_type,
@@ -160,14 +142,14 @@ class ImageBackbone(nn.Module):
         pos = torch.stack([grid_x, grid_y], dim=-1).view(1, feat_h * feat_w, 2)
         return pos.expand(batch_size, -1, -1)
 
-    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor | tuple[int, int]]:
+    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         作用：执行图像编码并导出 Transformer 友好的 token。
 
         输入：
             images: Tensor(B, 3, H, W)
         输出：
-            dict，包含 feature_map、tokens、token_mask、token_pos、feat_hw
+            dict，包含 tokens、token_mask、token_pos
         """
         images = self._normalize_images(images)
         feature_map = self.proj(self.backbone(images))
@@ -187,9 +169,7 @@ class ImageBackbone(nn.Module):
         )
 
         return {
-            "feature_map": feature_map,
             "tokens": tokens,
             "token_mask": token_mask,
             "token_pos": token_pos,
-            "feat_hw": (feat_h, feat_w),
         }

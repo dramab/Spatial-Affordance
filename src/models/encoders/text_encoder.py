@@ -17,27 +17,12 @@ src/models/encoders/text_encoder.py
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import torch
 from torch import nn
 from transformers import AutoModel, AutoTokenizer
-
-
-def _cfg_get(cfg: Mapping[str, Any] | object, key: str, default: Any = None) -> Any:
-    """
-    作用：从 dict 或对象中统一读取配置。
-
-    输入：
-        cfg: 配置对象
-        key: str 配置键
-        default: 默认值
-    输出：
-        配置值
-    """
-    if isinstance(cfg, Mapping):
-        return cfg.get(key, default)
-    return getattr(cfg, key, default)
+from src.models.common import cfg_get
 
 
 class TextEncoder(nn.Module):
@@ -54,11 +39,10 @@ class TextEncoder(nn.Module):
 
     def __init__(self, cfg: Mapping[str, Any] | object):
         super().__init__()
-        self.cfg = cfg
-        model_name = str(_cfg_get(cfg, "type", "roberta-base"))
-        out_channels = int(_cfg_get(cfg, "out_channels", 256))
-        self.max_length = int(_cfg_get(cfg, "max_length", 64))
-        freeze = bool(_cfg_get(cfg, "freeze", False))
+        model_name = str(cfg_get(cfg, "type", "roberta-base"))
+        out_channels = int(cfg_get(cfg, "out_channels", 256))
+        self.max_length = int(cfg_get(cfg, "max_length", 64))
+        freeze = bool(cfg_get(cfg, "freeze", False))
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.backbone = AutoModel.from_pretrained(model_name)
@@ -69,49 +53,6 @@ class TextEncoder(nn.Module):
         if freeze:
             for param in self.backbone.parameters():
                 param.requires_grad = False
-
-    def _tokenize_texts(self, texts: Sequence[str]) -> dict[str, torch.Tensor]:
-        """
-        作用：将原始字符串列表转换为 tokenizer batch。
-
-        输入：
-            texts: 文本序列
-        输出：
-            dict[str, Tensor]，包含 input_ids、attention_mask 等字段
-        """
-        if not texts:
-            raise ValueError("text_inputs must not be empty")
-        return self.tokenizer(
-            list(texts),
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
-
-    def _prepare_inputs(
-            self,
-            text_inputs: Sequence[str] | Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """
-        作用：统一处理原始文本与预分词输入。
-
-        输入：
-            text_inputs: list[str] 或 dict[str, Tensor]
-        输出：
-            dict[str, Tensor]，位于当前模块设备上
-        """
-        if isinstance(text_inputs, Mapping):
-            encoded = dict(text_inputs)
-        else:
-            encoded = self._tokenize_texts(text_inputs)
-
-        device = self.proj.weight.device
-        prepared = {}
-        for key, value in encoded.items():
-            if not isinstance(value, torch.Tensor):
-                raise TypeError(f"tokenized input field {key} must be a torch.Tensor")
-            prepared[key] = value.to(device)
-        return prepared
 
     def forward(
             self,
@@ -124,7 +65,25 @@ class TextEncoder(nn.Module):
         输出：
             dict，包含 tokens、token_mask
         """
-        encoded = self._prepare_inputs(text_inputs)
+        if isinstance(text_inputs, Mapping):
+            encoded = dict(text_inputs)
+        else:
+            if not text_inputs:
+                raise ValueError("text_inputs must not be empty")
+            encoded = self.tokenizer(
+                list(text_inputs),
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
+
+        device = self.proj.weight.device
+        for key, value in encoded.items():
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"tokenized input field {key} must be a torch.Tensor")
+            encoded[key] = value.to(device)
+
         backbone_outputs = self.backbone(**encoded)
         hidden_state = backbone_outputs.last_hidden_state.to(torch.float32)
         tokens = self.proj(hidden_state)

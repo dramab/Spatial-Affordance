@@ -30,22 +30,6 @@ import torch
 from torch import nn
 
 
-def _cfg_get(cfg: dict | object, key: str, default):
-    """
-    作用：从 dict 或对象中统一读取配置。
-
-    输入：
-        cfg: 配置字典或对象
-        key: str 配置键名
-        default: 默认值
-    输出：
-        配置值
-    """
-    if isinstance(cfg, dict):
-        return cfg.get(key, default)
-    return getattr(cfg, key, default)
-
-
 class UnifiedMultimodalEncoder(nn.Module):
     """
     作用：将点云、图像、文本 token 投影到统一维度并编码为共享 memory。
@@ -58,7 +42,6 @@ class UnifiedMultimodalEncoder(nn.Module):
         dict，包含：
         - memory: Tensor(B, L, H)
         - memory_mask: BoolTensor(B, L)，True 表示有效 token
-        - memory_pos: Tensor(B, L, H)
         - modality_lengths: dict[str, int]
     """
 
@@ -159,7 +142,7 @@ class UnifiedMultimodalEncoder(nn.Module):
             image_inputs: 图像 token 输入
             text_inputs: 文本 token 输入
         输出：
-            dict，包含 memory、memory_mask、memory_pos、modality_lengths
+            dict，包含 memory、memory_mask、modality_lengths
         """
         branches = [
             ("point", point_inputs, self.point_proj, self.point_pos_proj, 0),
@@ -193,7 +176,6 @@ class UnifiedMultimodalEncoder(nn.Module):
         return {
             "memory": memory,
             "memory_mask": memory_mask,
-            "memory_pos": tokens,
             "modality_lengths": modality_lengths,
         }
 
@@ -208,7 +190,6 @@ class MultimodalDecoder(nn.Module):
     输出：
         dict，包含：
         - decoder_tokens: Tensor(B, Q, H)
-        - query_embed: Tensor(B, Q, H)
     """
 
     def __init__(
@@ -249,7 +230,7 @@ class MultimodalDecoder(nn.Module):
             memory: Tensor(B, L, H)
             memory_mask: BoolTensor(B, L)
         输出：
-            dict，包含 decoder_tokens 与 query_embed
+            dict，包含 decoder_tokens
         """
         batch_size = int(memory.shape[0])
         query_embed = self.query_embed.weight.unsqueeze(0).expand(batch_size, -1, -1)
@@ -261,5 +242,4 @@ class MultimodalDecoder(nn.Module):
         )
         return {
             "decoder_tokens": self.norm(decoder_tokens),
-            "query_embed": query_embed,
         }

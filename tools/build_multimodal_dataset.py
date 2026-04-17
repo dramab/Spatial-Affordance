@@ -226,6 +226,16 @@ def build_label_lookup(label_records: Iterable[dict]) -> Dict[Tuple[str, str], d
     return lookup
 
 
+def collect_available_rgb_filenames(rgb_dir: Path) -> set[str]:
+    """
+    用法: rgb_filenames = collect_available_rgb_filenames(Path("outputs/placement_rgb_bbox_vis"))
+    作用: 收集 RGB 目录下实际存在的图片文件名，用于过滤无 RGB 的样本
+    输入: rgb_dir: Path，RGB 图片目录
+    输出: set[str]，目录中存在的图片文件名集合
+    """
+    return {path.name for path in rgb_dir.glob("*") if path.is_file()}
+
+
 def iter_sample_records(sample_dir: Path) -> Iterator[Tuple[Path, dict]]:
     """
     用法: for sample_json, record in iter_sample_records(Path("outputs/hope/samples")): ...
@@ -306,11 +316,13 @@ def make_camera_serializable(
 def build_frame_lookup(
     source_dirs: Iterable[Path],
     label_lookup: Mapping[Tuple[str, str], dict],
+    available_rgb_filenames: set[str],
 ) -> Dict[Tuple[str, str, str], List[dict]]:
     """
-    用法: frame_lookup = build_frame_lookup(source_dirs, label_lookup)
-    作用: 从 placement 输出目录构建每条样本的基础记录，并按帧分组
-    输入: source_dirs: Iterable[Path]；label_lookup: 标签映射
+    用法: frame_lookup = build_frame_lookup(source_dirs, label_lookup, available_rgb_filenames)
+    作用: 从 placement 输出目录构建每条样本的基础记录，并按帧分组，仅保留 RGB 实际存在的样本
+    输入: source_dirs: Iterable[Path]；label_lookup: 标签映射；
+         available_rgb_filenames: RGB 文件名集合
     输出: dict，键为 (source_name, scene_id, frame_id)
     """
     frame_lookup: Dict[Tuple[str, str, str], List[dict]] = {}
@@ -333,6 +345,8 @@ def build_frame_lookup(
             point_cloud_path = point_cloud_dir / f"{scene_id}_{frame_id}.ply"
             grid_meta_path = grid_meta_dir / f"{scene_id}_{frame_id}.json"
             image_filename = f"{source_name}__{sample_id}.png"
+            if image_filename not in available_rgb_filenames:
+                continue
 
             base_record = {
                 "sample_id": sample_id,
@@ -520,8 +534,8 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     输出: dict，仅保留训练需要的目标框监督信息
     """
     center_world = np.asarray(record["center_world"], dtype=np.float64)
-    aabb_world = np.asarray(record["aabb_world"], dtype=np.float64)
-    box_size = aabb_world[3:] - aabb_world[:3]
+    canonical_aabb_object = np.asarray(record["canonical_aabb_object"], dtype=np.float64)
+    box_size = canonical_aabb_object[3:] - canonical_aabb_object[:3]
     yaw_degrees = float(record["yaw_degrees"])
     target_box = [
         float(center_world[0]),
@@ -608,7 +622,12 @@ def build_multimodal_dataset(
         raise FileNotFoundError(f"Label JSON not found: {label_json}")
 
     label_lookup = build_label_lookup(load_json(label_json))
-    frame_lookup = build_frame_lookup(source_dirs=source_dirs, label_lookup=label_lookup)
+    available_rgb_filenames = collect_available_rgb_filenames(rgb_dir)
+    frame_lookup = build_frame_lookup(
+        source_dirs=source_dirs,
+        label_lookup=label_lookup,
+        available_rgb_filenames=available_rgb_filenames,
+    )
     source_configs = build_source_configs(source_name for source_name, _, _ in frame_lookup.keys())
     all_records = enrich_records_with_frame_meta(
         frame_lookup=frame_lookup,

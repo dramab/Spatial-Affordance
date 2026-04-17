@@ -27,22 +27,7 @@ import torch
 from torch import nn
 
 from src.models.backbones.voxelnet_encoder import VoxelNetEncoder
-
-
-def _cfg_get(cfg: Mapping[str, Any] | object, key: str, default: Any = None) -> Any:
-    """
-    从 dict 或对象中统一读取配置。
-
-    输入:
-        cfg: 配置对象
-        key: str 配置键
-        default: 默认值
-    输出:
-        任意配置值
-    """
-    if isinstance(cfg, Mapping):
-        return cfg.get(key, default)
-    return getattr(cfg, key, default)
+from src.models.common import cfg_get
 
 
 class PCBackbone(nn.Module):
@@ -58,24 +43,23 @@ class PCBackbone(nn.Module):
 
     def __init__(self, cfg: Mapping[str, Any] | object):
         super().__init__()
-        self.cfg = cfg
-        backbone_type = str(_cfg_get(cfg, "type", "voxelnet")).lower()
+        backbone_type = str(cfg_get(cfg, "type", "voxelnet")).lower()
         if backbone_type != "voxelnet":
             raise ValueError(f"unsupported pc backbone type: {backbone_type}")
 
-        voxel_size = _cfg_get(cfg, "voxel_size", (0.025, 0.025, 0.025))
-        point_cloud_range = _cfg_get(
+        voxel_size = cfg_get(cfg, "voxel_size", (0.025, 0.025, 0.025))
+        point_cloud_range = cfg_get(
             cfg,
             "point_cloud_range",
             (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
         )
-        max_points_per_voxel = int(_cfg_get(cfg, "max_points_per_voxel", 32))
-        max_voxels = int(_cfg_get(cfg, "max_voxels", 20000))
-        input_feature_dim = int(_cfg_get(cfg, "input_feature_dim", 6))
-        svfe_hidden_channels = int(_cfg_get(cfg, "svfe_hidden_channels", 32))
-        svfe_out_channels = int(_cfg_get(cfg, "svfe_out_channels", 128))
-        cml_channels = tuple(_cfg_get(cfg, "cml_channels", (128, 256, 256)))
-        return_dense = bool(_cfg_get(cfg, "return_dense", True))
+        max_points_per_voxel = int(cfg_get(cfg, "max_points_per_voxel", 32))
+        max_voxels = int(cfg_get(cfg, "max_voxels", 20000))
+        input_feature_dim = int(cfg_get(cfg, "input_feature_dim", 6))
+        svfe_hidden_channels = int(cfg_get(cfg, "svfe_hidden_channels", 32))
+        svfe_out_channels = int(cfg_get(cfg, "svfe_out_channels", 128))
+        cml_channels = tuple(cfg_get(cfg, "cml_channels", (128, 256, 256)))
+        return_dense = bool(cfg_get(cfg, "return_dense", True))
 
         self.backbone = VoxelNetEncoder(
             voxel_size=voxel_size,
