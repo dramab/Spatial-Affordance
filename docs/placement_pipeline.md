@@ -38,14 +38,15 @@ RGBD 图像 + 物体标注
     │
     ▼
 [Step 4] 逐物体处理：
-    ├── 可见性预检查（8 角点是否在图像内）
-    ├── 目标物体体素化（仅用于结果对齐与可视化）
+    ├── 目标物体体素化（用于结果对齐与可视化）
+    ├── 可见性预检查（8 角点是否在图像内且不被其他几何遮挡）
     ├── 支撑面检测（优先在点云中用 RANSAC 检测水平支撑面，失败时回退到栅格搜索）
-    ├── FFT 碰撞搜索（X, Y, θ 配置空间）
+    ├── 姿态分析（判断原始 roll/pitch 是否合理，决定是否保留）
+    ├── FFT 碰撞搜索（X, Y, θ 配置空间，带 ROI 裁剪）
     ├── 稳定性过滤（支撑比 + 质心投影）
     ├── 可见性过滤（放置后 8 角点仍在图像内）
     ├── 遮挡过滤（Z-buffer 比较）
-    └── DBSCAN 聚类（世界 XY 空间）
+    └── DBSCAN 聚类（世界 XY 空间，选距质心最近者为代表）
     │
     ▼
 [Step 5] 输出 PlacementResult（每物体若干聚类代表）
@@ -67,7 +68,7 @@ RGBD 图像 + 物体标注
 3. 将平面内点投影回体素网格 XY 平面，做形态学闭运算与连通域筛选
 4. 若提供当前物体体素，则在多个候选支撑面中选择与该物体 `3D` 欧氏距离最近的那个候选
 
-若点云拟合失败，则自动退回到占据栅格逐层搜索方案，并沿用相同的“最近支撑面”选择规则。接口仍返回单个 `(table_z, surface_mask)`，但它不再固定表示全局面积最大的平面，而是表示当前物体对应的最近支撑面。
+若点云拟合失败，则自动退回到占据栅格逐层搜索方案，并沿用相同的"最近支撑面"选择规则。接口仍返回单个 `(table_z, surface_mask)`，但它不再固定表示全局面积最大的平面，而是表示当前物体对应的最近支撑面。
 
 注意：当前支撑面检测默认世界坐标的竖直方向与 `+Z` 对齐。
 
@@ -94,19 +95,21 @@ RGBD 图像 + 物体标注
 随后将旋转后的物体体素投影到 XY 平面得到 2D footprint，与支撑面上方的障碍物 2D 投影做**互相关（FFT 卷积）**，互相关为 0 的位置即无碰撞。
 
 - 安全边距 `safety_margin`：在碰撞检测前对障碍物做 XY 平面膨胀
+- **ROI 裁剪**：基于 `surface_mask_2d` 的包围盒加 padding 裁剪搜索区域，减少 FFT 计算量
 - 输出：所有 (x_voxel, y_voxel, yaw_idx) 三元组候选
 - 当前实现保留目标物体原始占据，因此候选位置不会与物体当前所在位置重合
-- 物体姿态：使用 `compute_placed_transform()` 生成纯 yaw 旋转变换，确保物体底面平行于支撑面
+- 物体姿态：使用 `compute_placed_transform()` 或 `compute_placed_transform_with_orientation()` 生成旋转变换
 
 ### 1.7 稳定性过滤
 
 对每个候选位置，检查：
 1. 物体底面与支撑面的重叠比例 ≥ `min_support_ratio`
 2. 物体质心在 XY 平面的投影落在支撑区域内（防止悬空倾倒）
+3. 支撑面边缘会先做 `edge_margin_voxels=1` 的形态学腐蚀，避免物体半悬空在支撑面边缘
 
 ### 1.8 可见性过滤
 
-将放置后物体的 8 个 OBB 角点投影到图像平面，要求所有角点均在图像范围内（含 `vis_margin_px` 像素边距）。
+将放置后物体的 8 个 OBB 角点投影到图像平面，要求所有角点均在图像范围内。
 
 ### 1.9 遮挡过滤
 
@@ -114,7 +117,7 @@ RGBD 图像 + 物体标注
 
 ### 1.10 DBSCAN 聚类
 
-将通过所有过滤的候选点在世界 XY 空间做 DBSCAN 聚类（半径 `dbscan_eps`），每个聚类选取**自由空间得分最高**的候选作为代表，减少输出冗余。
+将通过所有过滤的候选点在世界 XY 空间做 DBSCAN 聚类（半径 `dbscan_eps`，默认按物体尺度自适应估计），每个聚类选取**距离簇质心最近的候选**作为代表，减少输出冗余。若簇内存在原始朝向 yaw 的候选，会优先在原始朝向中选择。
 
 ---
 
@@ -123,7 +126,7 @@ RGBD 图像 + 物体标注
 ```
 src/
 ├── utils/
-│   └── coord_utils.py          # 通用坐标变换
+│   └── coord_utils.py          # 通用坐标变换、姿态分析、场景标准化
 │
 ├── annotation/
 │   ├── free_bbox/              # 放置规划通用模块
@@ -131,13 +134,14 @@ src/
 │   │   ├── occupancy.py        # 深度图 → 点云 → 占据栅格
 │   │   ├── voxel_utils.py      # 体素坐标转换工具
 │   │   ├── grid_ops.py         # 栅格操作（体素化、场景占据标记、膨胀）
-│   │   ├── surface.py          # 支撑面检测
-│   │   ├── collision.py        # FFT 碰撞检测
-│   │   ├── filters.py          # 稳定性/可见性/遮挡过滤
+│   │   ├── surface.py          # 支撑面检测（点云 RANSAC 优先，栅格搜索回退）
+│   │   ├── collision.py        # FFT 碰撞搜索（支持姿态保留与 ROI 裁剪）
+│   │   ├── filters.py          # 稳定性/可见性/遮挡过滤、可见性预检查
 │   │   ├── cluster.py          # DBSCAN 聚类
 │   │   ├── pipeline.py         # PlacementPipeline 编排
 │   │   ├── io_utils.py         # 文件读写（PLY, JSON）
-│   │   └── visualize.py        # 可视化
+│   │   ├── visualize.py        # 可视化
+│   │   └── state_tracker.py    # 每样本状态标记与结果完备性检查
 │   │
 │   └── bbox3d/
 │       ├── bbox_utils.py       # 3D bbox 工具（角点、接触面）
@@ -145,7 +149,8 @@ src/
 │
 └── datasets/
     ├── base_adapter.py         # 抽象基类 DatasetAdapter
-    └── hope_adapter.py         # HOPE-Video 数据集适配器
+    ├── hope_adapter.py         # HOPE-Video 数据集适配器
+    └── housecat6d_adapter.py   # HouseCat6D 数据集适配器
 
 tools/
 └── run_placement.py            # CLI 入口
@@ -160,14 +165,14 @@ configs/
 | 文件 | 核心函数 | 职责 |
 |---|---|---|
 | `datatypes.py` | `SceneData`, `CameraParams`, `ObjectInfo`, `PlacementConfig` | 统一数据接口定义 |
-| `coord_utils.py` | `transform_points`, `project_world`, `rotation_z_3x3` | 坐标变换、投影 |
+| `coord_utils.py` | `transform_points`, `project_world`, `rotation_z_3x3`, `analyze_pose_orientation`, `compute_placed_transform_with_orientation` | 坐标变换、投影、姿态分析 |
 | `occupancy.py` | `depth_to_pointcloud`, `build_occupancy_grid` | RGBD → 占据栅格 |
 | `voxel_utils.py` | `make_voxel_params`, `world_to_voxel`, `voxel_to_world` | 体素坐标系管理 |
 | `grid_ops.py` | `voxelize_obb`, `prepare_grid_base`, `dilate_obstacles_xy` | 栅格操作 |
 | `surface.py` | `detect_support_surfaces` | 支撑面检测（点云 RANSAC 优先，栅格搜索回退） |
-| `collision.py` | `find_table_placements` | FFT 碰撞搜索（物体平放姿态） |
-| `filters.py` | `filter_stable/visible/occluded_placements` | 三级过滤 |
-| `cluster.py` | `cluster_placements` | DBSCAN 聚类 |
+| `collision.py` | `find_table_placements` | FFT 碰撞搜索（保留姿态 + ROI 裁剪） |
+| `filters.py` | `is_fully_visible`, `filter_stable/visible/occluded_placements` | 预检查 + 三级过滤 |
+| `cluster.py` | `cluster_placements` | DBSCAN 聚类（自适应 eps） |
 | `pipeline.py` | `PlacementPipeline.run` | 流程编排 |
 | `io_utils.py` | `save_ply`, `save_placement_annotations`, `save_placement_samples` | 结果持久化 |
 | `visualize.py` | `save_placement_vis` | 双面板可视化 |
@@ -200,11 +205,19 @@ DatasetAdapter.load_scene()
                     ├─→ voxelize_obb(bbox3d, pose_world, vp)
                     │       └─→ target_vox (M,3)
                     │
+                    ├─→ is_fully_visible(...) + build_depth_buffer(grid_other)
+                    │       └─→ bool（可见性预检查）
+                    │
                     ├─→ detect_support_surfaces(grid_other, vp, points_world=pts_world,
                     │                          target_voxels=target_vox)
                     │       └─→ table_z (int), surface_mask (Gx,Gy) bool
                     │
-                    ├─→ find_table_placements(grid_base, bbox3d, pose_world, vp, table_z, surface_mask)
+                    ├─→ analyze_pose_orientation(T_obj2world, bbox3d)
+                    │       └─→ pose_info dict（姿态是否合理）
+                    │
+                    ├─→ find_table_placements(grid_base, bbox3d, pose_world, vp,
+                    │                          table_z, surface_mask, ...,
+                    │                          preserve_orientation, orientation_threshold_deg)
                     │       └─→ candidates (N,3), meta dict, yaw_data dict
                     │
                     ├─→ filter_stable_placements(candidates, yaw_data, surface_mask)
@@ -228,23 +241,29 @@ DatasetAdapter.load_scene()
 **`yaw_data` dict**（由 `find_table_placements` 返回）：
 ```python
 {
-    "yaw_angles": (S,) float,        # 每个 yaw 角度（弧度）
-    "T_rotated":  (S, 4, 4) float,   # 每个 yaw 对应的旋转变换矩阵
-    "vmin_rot_abs": (S, 3) float,    # 旋转后 bbox 的最小角（体素坐标）
-    "footprints": [(Fx,Fy) bool],    # 每个 yaw 的 2D footprint
+    "yaw_angles":   (S,) float,        # 每个 yaw 角度（弧度）
+    "rel_voxels":   [(Vx,Vy,Vz) int],  # 每个 yaw 下体素相对坐标列表
+    "vmin_rot_abs": (S, 3) float,      # 旋转后 bbox 的最小角（体素坐标）
+    "T_rotated":    (S, 4, 4) float,   # 每个 yaw 对应的旋转变换矩阵
+    "footprints":   [(Fx,2) int],      # 每个 yaw 的底面足迹（相对 XY）
+    "original_yaw_index": int,         # 原始 yaw 对应的离散索引
+    "pose_info":    dict or None,      # 姿态分析结果（合理时非 None）
 }
 ```
 
 **`cluster_infos` list**（每个元素为一个聚类）：
 ```python
 {
-    "cluster_id": int,                 # 聚类编号
-    "size": int,                       # 聚类内候选数量
-    "anchor_voxel": [x, y, yaw_idx],   # 体素坐标 + yaw 索引
-    "anchor_world": [wx, wy, wz],      # 世界坐标
-    "yaw_index": int,                  # yaw 离散索引
-    "yaw_degrees": float,              # yaw 角度（度）
-    "free_score": float,               # 自由空间得分（越高越好）
+    "cluster_id":          int,                 # 聚类编号
+    "size":                int,                 # 聚类内候选数量
+    "anchor_voxel":        [x, y, yaw_idx],     # 体素坐标 + yaw 索引
+    "anchor_world":        [wx, wy, wz],        # 世界坐标
+    "yaw_index":           int,                 # yaw 离散索引
+    "yaw_degrees":         float,               # yaw 角度（度）
+    "centroid_distance":   float,               # 代表到簇质心的距离
+    "dbscan_eps":          float,               # 实际使用的聚类半径
+    "dbscan_min_samples":  int,                 # 实际使用的最小样本数
+    "used_original_yaw":   bool,                # 是否优先使用了原始 yaw
 }
 ```
 
@@ -335,7 +354,27 @@ elif ds_type == "my_dataset":
     return MyDatasetAdapter(root_dir=ds_cfg["root_dir"])
 ```
 
-### 4.6 参数调整建议
+### 4.6 PlacementConfig 字段说明
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `voxel_size` | float | 1.0 | 体素边长 |
+| `pixel_stride` | int | 4 | 深度图采样步长 |
+| `grid_padding` | float | 10.0 | 栅格边界扩展 |
+| `safety_margin` | float | 0.5 | 碰撞安全边距（场景单位） |
+| `yaw_steps` | int | 24 | yaw 旋转离散步数 |
+| `min_surface_area` | float | 50.0 | 最小支撑面面积（场景单位²） |
+| `min_support_ratio` | float | 1.0 | 最小支撑比（0~1） |
+| `occlusion_threshold` | float | 0.3 | 遮挡比例上限 |
+| `dbscan_eps` | float / None | None | DBSCAN 半径，None 表示自适应 |
+| `dbscan_min_samples` | int | 1 | DBSCAN 最小样本数 |
+| `world_up` | tuple | (0,0,1) | 世界坐标系上方向 |
+| `vis_margin_px` | int | 30 | 可见性检查图像边距（像素） |
+| `stability_chunk_size` | int | 2000 | 稳定性过滤批处理大小 |
+| `preserve_orientation` | bool | True | 是否保留原始合理姿态 |
+| `orientation_threshold_deg` | float | 15.0 | 姿态判断容差（度） |
+
+### 4.7 参数调整建议
 
 不同数据集可能需要调整以下参数：
 
@@ -346,6 +385,7 @@ elif ds_type == "my_dataset":
 | `safety_margin` | 碰撞安全边距 | 场景单位，通常为 0.5~2 个体素 |
 | `min_surface_area` | 最小支撑面面积 | 场景单位²，内部会按 `voxel_size` 换算为体素面积阈值；过小会检测到噪声平面 |
 | `pixel_stride` | 深度图采样步长 | 越小越精确但越慢，通常 2~8 |
+| `orientation_threshold_deg` | 姿态判断容差 | 越小对原始姿态要求越严格，倾斜物体更容易被纠正为平放 |
 
 ---
 
@@ -371,9 +411,12 @@ output_root/
 │   ├── scene_0003_0002.npy
 │   ├── scene_0003_0002.ply
 │   └── ...
-└── grid_meta/
-    ├── scene_0003_0002.json
-    └── ...
+├── grid_meta/
+│   ├── scene_0003_0002.json
+│   └── ...
+└── status/
+    ├── running/
+    └── failed/
 ```
 
 说明：
@@ -382,6 +425,7 @@ output_root/
 - `samples/` 保存按 placement 展平后的训练样本。
 - `point_clouds/`、`occupancy_grids/`、`grid_meta/` 是每帧都会生成的必要文件。
 - `visualizations/` 仅在开启 `save_vis` 时保存。
+- `status/` 用于跟踪每帧处理状态（running / failed），是 OOM Kill 容错机制的核心。
 
 ### 5.2 placements JSON 格式
 
@@ -406,7 +450,7 @@ output_root/
           "yaw_degrees": 15.0,
           "transform_world": [[...], [...], [...], [...]],
           "aabb_world": [x1, y1, z1, x2, y2, z2],
-          "free_space_score": 142
+          "free_space_score": 2.4
         }
       ]
     }
@@ -438,7 +482,7 @@ output_root/
       "yaw_degrees": 15.0,
       "transform_world": [[...], [...], [...], [...]],
       "aabb_world": [x1, y1, z1, x2, y2, z2],
-      "free_space_score": 142
+      "free_space_score": 2.4
     }
   ]
 }
@@ -447,7 +491,8 @@ output_root/
 说明：
 - `placements` 中只保留有有效放置位置的物体。
 - `samples` 中每个元素对应一条可直接用于训练的 placement 样本。
-- `rank` 按同一物体内的候选排序，`free_space_score` 越大表示周围越空旷。
+- `rank` 按同一物体内的候选排序。
+- `free_space_score` 实际保存的是该代表到簇质心的距离（cm），数值越小表示越靠近簇中心。
 
 ### 5.4 grid_meta JSON 格式
 
@@ -509,36 +554,49 @@ python -c "import numpy, scipy, sklearn, matplotlib, trimesh; print('OK')"
 编辑 `configs/annotation/placement.yaml`：
 
 ```yaml
+# 数据集适配器
 dataset:
   type: hope
   root_dir: /path/to/hope_video
   mesh_dir: /path/to/hope_meshes
   frame_step: 60          # 每隔 60 帧取一帧
+  skip_frames:            # 可选：跳过特定场景/帧
+    scene_0001: ["0000", "0001"]
+    scene_0002: ["all"]   # 跳过该场景所有帧
 
+# 占据栅格
 occupancy:
   voxel_size: 1.0         # 体素边长（cm）
   pixel_stride: 4         # 深度图采样步长
   grid_padding: 10.0      # 栅格边界扩展（cm）
 
+# 放置规划
 placement:
   safety_margin: 0.5      # 碰撞安全边距（体素数）
   yaw_steps: 24           # yaw 离散步数
   min_surface_area: 50.0  # 最小支撑面面积（场景单位²）
   min_support_ratio: 1.0  # 最小支撑比
+  occlusion_threshold: 0.3
   world_up: [0, 0, 1]     # 世界坐标系上方向
+  preserve_orientation: true      # 是否保留原始合理姿态
+  orientation_threshold_deg: 15.0 # 姿态判断容差（度）
 
+# 聚类
 clustering:
-  dbscan_eps: 5.0         # DBSCAN 聚类半径（体素单位）
+  dbscan_eps: null        # null 表示按物体尺度自适应估计
   dbscan_min_samples: 1
 
+# 可视化
 visualization:
   save_vis: true
   vis_margin_px: 30       # 可见性检查图像边距（像素）
 
+# 计算
 compute:
   use_gpu: false
   stability_chunk_size: 2000
 
+# 输出
 output:
   dir: outputs/placement
 ```
@@ -611,6 +669,8 @@ config = PlacementConfig(
     voxel_size=1.0,
     safety_margin=0.5,
     yaw_steps=24,
+    preserve_orientation=True,
+    orientation_threshold_deg=15.0,
 )
 
 # 运行 pipeline

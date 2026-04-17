@@ -164,7 +164,7 @@ class MultimodalModel(nn.Module):
             "tokens": token_dict["tokens"],
             "token_mask": token_dict["token_mask"],
             "token_pos": token_dict["token_pos"],
-            "token_coords_cm": token_dict["token_coords_cm"],
+            "token_coords": token_dict["token_coords"],
             "sparse_coords": token_dict["sparse_coords"],
             "token_counts": token_dict["token_counts"],
         }

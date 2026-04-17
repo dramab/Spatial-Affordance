@@ -1,0 +1,657 @@
+#!/usr/bin/env python3
+"""
+tools/build_multimodal_dataset.py
+---------------------------------
+将 RGB 可视化图、点云、文本提示与 placement 几何监督整理为统一多模态数据集，
+并生成 train/test 标注清单。
+
+用法:
+    python tools/build_multimodal_dataset.py \
+        --rgb-dir outputs/placement_rgb_bbox_vis \
+        --label-json outputs/auto_labels/all_labels_polished.json \
+        --source-dirs outputs/hope outputs/housecat6d \
+        --output-dir data/annotations/placement_multimodal \
+        --train-ratio 0.8 \
+        --seed 42
+
+作用:
+    - 对齐 RGB、文本、点云、placement sample
+    - 从原始数据集读取每帧相机参数
+    - 基于点云和相机外参预计算 box_norm_meta
+    - 按 source_name 分层随机切分 train/test
+
+输入:
+    --rgb-dir: RGB 可视化图片目录
+    --label-json: auto label 结果 JSON
+    --source-dirs: 一个或多个 placement 输出根目录
+    --output-dir: 标注输出目录
+    --train-ratio: 训练集比例，默认 0.8
+    --seed: 随机种子，默认 42
+
+输出:
+    output-dir/
+        - train.json
+        - test.json
+        - summary.json
+
+使用示例:
+    python tools/build_multimodal_dataset.py \
+        --output-dir data/annotations/placement_multimodal
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import random
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, Iterator, List, Mapping, Tuple
+
+import numpy as np
+import yaml
+from PIL import Image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+SCHEMA_VERSION = "placement_multimodal_dataset/v1"
+DEFAULT_CONFIGS = {
+    "hope": PROJECT_ROOT / "configs/annotation/placement.yaml",
+    "housecat6d": PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """
+    用法: parser = build_parser()
+    作用: 构建命令行参数解析器
+    输入: 无
+    输出: argparse.ArgumentParser，配置完成的解析器
+    """
+    parser = argparse.ArgumentParser(description="构建 RGB-点云-文本多模态数据集索引")
+    parser.add_argument(
+        "--rgb-dir",
+        type=Path,
+        default=Path("outputs/placement_rgb_bbox_vis"),
+        help="RGB 可视化图片目录",
+    )
+    parser.add_argument(
+        "--label-json",
+        type=Path,
+        default=Path("outputs/auto_labels/all_labels_polished.json"),
+        help="文本标签 JSON 路径",
+    )
+    parser.add_argument(
+        "--source-dirs",
+        nargs="+",
+        type=Path,
+        default=[Path("outputs/hope"), Path("outputs/housecat6d")],
+        help="placement 输出根目录列表",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/annotations/placement_multimodal"),
+        help="输出标注目录",
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.8,
+        help="训练集比例，默认 0.8",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="随机种子，默认 42",
+    )
+    return parser
+
+
+def load_yaml_config(config_path: Path) -> dict:
+    """
+    用法: cfg = load_yaml_config(Path("configs/annotation/placement.yaml"))
+    作用: 读取 YAML 配置文件
+    输入: config_path: Path，配置文件路径
+    输出: dict，配置内容
+    """
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def build_adapter(cfg: dict):
+    """
+    用法: adapter = build_adapter(cfg)
+    作用: 根据配置创建数据集适配器
+    输入: cfg: dict，YAML 配置内容
+    输出: DatasetAdapter，对应数据集适配器实例
+    """
+    ds_cfg = cfg.get("dataset", {})
+    ds_type = ds_cfg.get("type")
+
+    if ds_type == "hope":
+        from src.datasets.hope_adapter import HopeAdapter
+
+        return HopeAdapter(
+            root_dir=ds_cfg["root_dir"],
+            mesh_dir=ds_cfg.get("mesh_dir"),
+            frame_step=ds_cfg.get("frame_step", 60),
+        )
+
+    if ds_type == "housecat6d":
+        from src.datasets.housecat6d_adapter import HouseCat6DAdapter
+
+        return HouseCat6DAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 60),
+        )
+
+    raise ValueError(f"Unsupported dataset type: {ds_type}")
+
+
+def build_source_configs(source_names: Iterable[str]) -> Dict[str, dict]:
+    """
+    用法: cfgs = build_source_configs(["hope", "housecat6d"])
+    作用: 为每个 source_name 读取对应的数据集配置
+    输入: source_names: Iterable[str]，来源名称序列
+    输出: dict，source_name -> 配置字典
+    """
+    configs: Dict[str, dict] = {}
+    for source_name in sorted(set(source_names)):
+        config_path = DEFAULT_CONFIGS.get(source_name)
+        if config_path is None:
+            raise KeyError(f"No dataset config mapping for source: {source_name}")
+        configs[source_name] = load_yaml_config(config_path)
+    return configs
+
+
+def load_json(json_path: Path):
+    """
+    用法: payload = load_json(Path("outputs/meta.json"))
+    作用: 读取 JSON 文件
+    输入: json_path: Path，JSON 路径
+    输出: 任意 JSON 对象
+    """
+    with json_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def to_repo_relative(path: Path) -> str:
+    """
+    用法: rel = to_repo_relative(Path("outputs/demo/file.json"))
+    作用: 将路径转换为相对仓库根目录的 POSIX 路径
+    输入: path: Path，仓库内路径
+    输出: str，相对路径
+    """
+    return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+
+
+def parse_source_name_from_rgb_name(image_filename: str) -> Tuple[str, str]:
+    """
+    用法: source_name, sample_id = parse_source_name_from_rgb_name("hope__scene_0000_0000_obj_1_p000.png")
+    作用: 从 RGB 文件名中解析 source_name 和 sample_id
+    输入: image_filename: str，图片文件名
+    输出: tuple[str, str]，来源名与 sample_id
+    """
+    if "__" not in image_filename:
+        raise ValueError(f"Invalid RGB filename: {image_filename}")
+    source_name, sample_part = image_filename.split("__", 1)
+    return source_name, Path(sample_part).stem
+
+
+def build_label_lookup(label_records: Iterable[dict]) -> Dict[Tuple[str, str], dict]:
+    """
+    用法: lookup = build_label_lookup(label_records)
+    作用: 构建 (source_name, sample_id) 到文本标签的映射表
+    输入: label_records: Iterable[dict]，标签记录序列
+    输出: dict，键为 (source_name, sample_id)
+    """
+    lookup: Dict[Tuple[str, str], dict] = {}
+    for record in label_records:
+        image_filename = str(record.get("image_filename", ""))
+        source_name = str(record.get("source_name", "")).strip()
+        sample_id = str(record.get("sample_id", "")).strip()
+        if not source_name or not sample_id:
+            if image_filename:
+                source_name, sample_id = parse_source_name_from_rgb_name(image_filename)
+            else:
+                raise ValueError(f"Invalid label record without source/sample id: {record}")
+        key = (source_name, sample_id)
+        if key in lookup:
+            raise ValueError(f"Duplicated label key: {key}")
+        lookup[key] = record
+    return lookup
+
+
+def iter_sample_records(sample_dir: Path) -> Iterator[Tuple[Path, dict]]:
+    """
+    用法: for sample_json, record in iter_sample_records(Path("outputs/hope/samples")): ...
+    作用: 展平单个 source 目录下的 placement sample 记录
+    输入: sample_dir: Path，samples 子目录
+    输出: Iterator[(Path, dict)]，样本 JSON 路径与单条样本记录
+    """
+    for sample_json in sorted(sample_dir.glob("*.json")):
+        payload = load_json(sample_json)
+        for record in payload.get("samples", []):
+            yield sample_json, record
+
+
+def read_ascii_ply_points(ply_path: Path) -> np.ndarray:
+    """
+    用法: points = read_ascii_ply_points(Path("outputs/hope/point_clouds/scene_0000_0000.ply"))
+    作用: 读取 ASCII PLY 点云中的 xyz 坐标
+    输入: ply_path: Path，PLY 文件路径
+    输出: ndarray(N, 3)，点云坐标
+    """
+    with ply_path.open("r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    end_header_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "end_header":
+            end_header_idx = idx
+            break
+    if end_header_idx is None:
+        raise ValueError(f"PLY header missing end_header: {ply_path}")
+
+    payload = "".join(lines[end_header_idx + 1 :]).strip()
+    if not payload:
+        raise ValueError(f"PLY contains no vertex payload: {ply_path}")
+
+    points = np.loadtxt(io.StringIO(payload), usecols=(0, 1, 2), dtype=np.float64)
+    if points.ndim == 1:
+        points = points.reshape(1, 3)
+    return points
+
+
+def get_scene_path(dataset_root: Path, scene_id: str) -> Path:
+    """
+    用法: scene_path = get_scene_path(Path("/data/hope"), "scene_0000")
+    作用: 根据 scene_id 构造原始数据集中的场景路径
+    输入: dataset_root: Path；scene_id: str
+    输出: Path，场景目录路径
+    """
+    return dataset_root / scene_id
+
+
+def make_camera_serializable(
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    img_w: int,
+    img_h: int,
+    e_c2w: np.ndarray,
+) -> dict:
+    """
+    用法: camera_dict = make_camera_serializable(100.0, 101.0, 32.0, 24.0, 64, 48, np.eye(4))
+    作用: 将相机字段转为可写入 JSON 的字典
+    输入: fx/fy/cx/cy: float；img_w/img_h: int；e_c2w: ndarray(4,4)
+    输出: dict，可序列化相机字段
+    """
+    return {
+        "fx": float(fx),
+        "fy": float(fy),
+        "cx": float(cx),
+        "cy": float(cy),
+        "img_w": int(img_w),
+        "img_h": int(img_h),
+        "E_c2w": np.asarray(e_c2w, dtype=np.float64).tolist(),
+    }
+
+
+def build_frame_lookup(
+    source_dirs: Iterable[Path],
+    label_lookup: Mapping[Tuple[str, str], dict],
+) -> Dict[Tuple[str, str, str], List[dict]]:
+    """
+    用法: frame_lookup = build_frame_lookup(source_dirs, label_lookup)
+    作用: 从 placement 输出目录构建每条样本的基础记录，并按帧分组
+    输入: source_dirs: Iterable[Path]；label_lookup: 标签映射
+    输出: dict，键为 (source_name, scene_id, frame_id)
+    """
+    frame_lookup: Dict[Tuple[str, str, str], List[dict]] = {}
+    for source_dir in sorted(source_dirs):
+        source_name = source_dir.name
+        samples_dir = source_dir / "samples"
+        point_cloud_dir = source_dir / "point_clouds"
+        grid_meta_dir = source_dir / "grid_meta"
+        if not samples_dir.exists():
+            raise FileNotFoundError(f"Missing samples directory: {samples_dir}")
+
+        for sample_json, record in iter_sample_records(samples_dir):
+            sample_id = str(record["sample_id"])
+            scene_id = str(record["scene_id"])
+            frame_id = str(record["frame_id"])
+            label_key = (source_name, sample_id)
+            if label_key not in label_lookup:
+                raise KeyError(f"Missing label for sample: {label_key}")
+
+            point_cloud_path = point_cloud_dir / f"{scene_id}_{frame_id}.ply"
+            grid_meta_path = grid_meta_dir / f"{scene_id}_{frame_id}.json"
+            image_filename = f"{source_name}__{sample_id}.png"
+
+            base_record = {
+                "sample_id": sample_id,
+                "source_name": source_name,
+                "scene_id": scene_id,
+                "frame_id": frame_id,
+                "image_filename": image_filename,
+                "rgb_path": to_repo_relative(PROJECT_ROOT / "outputs/placement_rgb_bbox_vis" / image_filename),
+                "point_cloud_path": to_repo_relative(point_cloud_path),
+                "grid_meta_path": to_repo_relative(grid_meta_path),
+                "sample_json_path": to_repo_relative(sample_json),
+                "placement": record,
+                "label_record": label_lookup[label_key],
+            }
+            frame_key = (source_name, scene_id, frame_id)
+            frame_lookup.setdefault(frame_key, []).append(base_record)
+    return frame_lookup
+
+
+def load_camera_for_frame(source_name: str, source_cfg: Mapping[str, object], scene_id: str, frame_id: str) -> dict:
+    """
+    用法: camera_dict = load_camera_for_frame("hope", cfg, "scene_0000", "0000")
+    作用: 从原始数据集最小化读取单帧相机参数
+    输入: source_name: str；source_cfg: 配置字典；scene_id/frame_id: str
+    输出: dict，可序列化相机字段
+    """
+    dataset_cfg = source_cfg.get("dataset", {})
+    dataset_root = Path(str(dataset_cfg["root_dir"]))
+    scene_path = get_scene_path(dataset_root, scene_id)
+
+    if source_name == "hope":
+        annot_path = scene_path / f"{frame_id}.json"
+        rgb_path = scene_path / f"{frame_id}_rgb.jpg"
+        annot = load_json(annot_path)
+        intrinsics = np.asarray(annot["camera"]["intrinsics"], dtype=np.float64)
+        e_w2c = np.asarray(annot["camera"]["extrinsics"], dtype=np.float64)
+        e_w2c[:3, 3] *= 100.0
+        e_c2w = np.linalg.inv(e_w2c)
+        img_w, img_h = Image.open(rgb_path).size
+        return make_camera_serializable(
+            fx=intrinsics[0, 0],
+            fy=intrinsics[1, 1],
+            cx=intrinsics[0, 2],
+            cy=intrinsics[1, 2],
+            img_w=img_w,
+            img_h=img_h,
+            e_c2w=e_c2w,
+        )
+
+    if source_name == "housecat6d":
+        intrinsics_path = scene_path / "intrinsics.txt"
+        camera_pose_path = scene_path / "camera_pose" / f"{frame_id}.txt"
+        rgb_path = scene_path / "rgb" / f"{frame_id}.png"
+        intrinsics = np.loadtxt(intrinsics_path, dtype=np.float64).reshape(3, 3)
+        e_c2w = np.loadtxt(camera_pose_path, dtype=np.float64).reshape(4, 4)
+        e_c2w[:3, 3] *= 100.0
+        img_w, img_h = Image.open(rgb_path).size
+        return make_camera_serializable(
+            fx=intrinsics[0, 0],
+            fy=intrinsics[1, 1],
+            cx=intrinsics[0, 2],
+            cy=intrinsics[1, 2],
+            img_w=img_w,
+            img_h=img_h,
+            e_c2w=e_c2w,
+        )
+
+    raise ValueError(f"Unsupported source_name: {source_name}")
+
+
+def enrich_records_with_frame_meta(
+    frame_lookup: Mapping[Tuple[str, str, str], List[dict]],
+    source_configs: Mapping[str, dict],
+    rgb_dir: Path,
+) -> List[dict]:
+    """
+    用法: records = enrich_records_with_frame_meta(frame_lookup, source_configs, rgb_dir)
+    作用: 为每条样本补齐相机参数和 box_norm_meta
+    输入: frame_lookup: 按帧分组的样本；source_configs: 来源配置映射；rgb_dir: RGB 目录
+    输出: list[dict]，完整样本列表
+    """
+    enriched_records: List[dict] = []
+    for frame_key in sorted(frame_lookup):
+        source_name, scene_id, frame_id = frame_key
+        sample_group = frame_lookup[frame_key]
+        point_cloud_rel = sample_group[0]["point_cloud_path"]
+        point_cloud_path = PROJECT_ROOT / point_cloud_rel
+        camera_dict = load_camera_for_frame(
+            source_name=source_name,
+            source_cfg=source_configs[source_name],
+            scene_id=scene_id,
+            frame_id=frame_id,
+        )
+
+        for item in sample_group:
+            rgb_path = rgb_dir / item["image_filename"]
+            grid_meta_path = PROJECT_ROOT / item["grid_meta_path"]
+            sample_json_path = PROJECT_ROOT / item["sample_json_path"]
+            label_record = item["label_record"]
+
+            required_paths = {
+                "rgb": rgb_path,
+                "point_cloud": point_cloud_path,
+                "grid_meta": grid_meta_path,
+                "sample_json": sample_json_path,
+            }
+            for key, path in required_paths.items():
+                if not path.exists():
+                    raise FileNotFoundError(f"Missing {key} file for {item['sample_id']}: {path}")
+
+            polished_label = str(label_record.get("polished_label", "")).strip()
+            raw_label = str(label_record.get("label", "")).strip()
+            if not polished_label:
+                raise ValueError(f"Empty polished_label for sample: {item['sample_id']}")
+            if not raw_label:
+                raise ValueError(f"Empty label for sample: {item['sample_id']}")
+
+            enriched_records.append({
+                "sample_id": item["sample_id"],
+                "source_name": item["source_name"],
+                "rgb_path": to_repo_relative(rgb_path),
+                "point_cloud_path": item["point_cloud_path"],
+                "prompt": raw_label,
+                "polished_prompt": polished_label,
+                "placement": build_minimal_placement(item["placement"]),
+                "camera": camera_dict,
+            })
+    return enriched_records
+
+
+def stratified_split_by_source(
+    records: Iterable[dict],
+    train_ratio: float,
+    seed: int,
+) -> Tuple[List[dict], List[dict]]:
+    """
+    用法: train_records, test_records = stratified_split_by_source(records, 0.8, 42)
+    作用: 按 source_name 分层随机切分 train/test
+    输入: records: 样本列表；train_ratio: float；seed: int
+    输出: tuple[list[dict], list[dict]]，训练集与测试集
+    """
+    grouped: Dict[str, List[dict]] = {}
+    for record in records:
+        grouped.setdefault(record["source_name"], []).append(record)
+
+    train_records: List[dict] = []
+    test_records: List[dict] = []
+    for source_name, source_records in sorted(grouped.items()):
+        sorted_records = sorted(source_records, key=lambda x: x["sample_id"])
+        rng = random.Random(f"{seed}:{source_name}")
+        rng.shuffle(sorted_records)
+        split_idx = int(len(sorted_records) * train_ratio)
+        train_records.extend(sorted_records[:split_idx])
+        test_records.extend(sorted_records[split_idx:])
+
+    sorter = lambda x: (x["source_name"], x["sample_id"])
+    return sorted(train_records, key=sorter), sorted(test_records, key=sorter)
+
+
+def build_split_payload(split_name: str, records: List[dict], seed: int, train_ratio: float) -> dict:
+    """
+    用法: payload = build_split_payload("train", records, 42, 0.8)
+    作用: 构造 train/test 标注 JSON 顶层结构
+    输入: split_name: str；records: list[dict]；seed: int；train_ratio: float
+    输出: dict，可直接写入 JSON
+    """
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "split": split_name,
+        "seed": int(seed),
+        "split_strategy": {
+            "type": "stratified_by_source_random_sample",
+            "train_ratio": float(train_ratio),
+        },
+        "sample_count": len(records),
+        "samples": records,
+    }
+
+
+def build_minimal_placement(record: Mapping[str, object]) -> dict:
+    """
+    用法: placement = build_minimal_placement(sample_record)
+    作用: 从原始 placement sample 中提取精简监督字段
+    输入: record: Mapping[str, object]，原始 placement 样本
+    输出: dict，仅保留训练需要的目标框监督信息
+    """
+    center_world = np.asarray(record["center_world"], dtype=np.float64)
+    aabb_world = np.asarray(record["aabb_world"], dtype=np.float64)
+    box_size = aabb_world[3:] - aabb_world[:3]
+    yaw_degrees = float(record["yaw_degrees"])
+    target_box = [
+        float(center_world[0]),
+        float(center_world[1]),
+        float(center_world[2]),
+        float(box_size[0]),
+        float(box_size[1]),
+        float(box_size[2]),
+        yaw_degrees,
+    ]
+    return {
+        "target_box": target_box,
+    }
+
+
+def build_summary(train_records: List[dict], test_records: List[dict]) -> dict:
+    """
+    用法: summary = build_summary(train_records, test_records)
+    作用: 汇总 train/test 的样本数与来源分布
+    输入: train_records/test_records: list[dict]
+    输出: dict，summary 信息
+    """
+    def count_by_source(items: Iterable[dict]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for item in items:
+            counts[item["source_name"]] = counts.get(item["source_name"], 0) + 1
+        return dict(sorted(counts.items()))
+
+    all_records = list(train_records) + list(test_records)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "total_samples": len(all_records),
+        "train_samples": len(train_records),
+        "test_samples": len(test_records),
+        "by_source": {
+            "all": count_by_source(all_records),
+            "train": count_by_source(train_records),
+            "test": count_by_source(test_records),
+        },
+    }
+
+
+def save_json(output_path: Path, payload: dict) -> None:
+    """
+    用法: save_json(Path("data/annotations/train.json"), payload)
+    作用: 将 JSON 写入磁盘
+    输入: output_path: Path；payload: dict
+    输出: None
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    """
+    用法: validate_args(args)
+    作用: 校验命令行参数的基本合法性
+    输入: args: argparse.Namespace
+    输出: None，非法时抛出异常
+    """
+    if not 0.0 < args.train_ratio < 1.0:
+        raise ValueError("--train-ratio must be in (0, 1)")
+
+
+def build_multimodal_dataset(
+    rgb_dir: Path,
+    label_json: Path,
+    source_dirs: Iterable[Path],
+    output_dir: Path,
+    train_ratio: float,
+    seed: int,
+) -> dict:
+    """
+    用法: summary = build_multimodal_dataset(rgb_dir, label_json, source_dirs, output_dir, 0.8, 42)
+    作用: 构建 train/test 多模态数据集并写出 JSON
+    输入: rgb_dir: Path；label_json: Path；source_dirs: Iterable[Path]；
+         output_dir: Path；train_ratio: float；seed: int
+    输出: dict，summary 信息
+    """
+    if not rgb_dir.exists():
+        raise FileNotFoundError(f"RGB directory not found: {rgb_dir}")
+    if not label_json.exists():
+        raise FileNotFoundError(f"Label JSON not found: {label_json}")
+
+    label_lookup = build_label_lookup(load_json(label_json))
+    frame_lookup = build_frame_lookup(source_dirs=source_dirs, label_lookup=label_lookup)
+    source_configs = build_source_configs(source_name for source_name, _, _ in frame_lookup.keys())
+    all_records = enrich_records_with_frame_meta(
+        frame_lookup=frame_lookup,
+        source_configs=source_configs,
+        rgb_dir=rgb_dir,
+    )
+    train_records, test_records = stratified_split_by_source(
+        records=all_records,
+        train_ratio=train_ratio,
+        seed=seed,
+    )
+
+    train_payload = build_split_payload("train", train_records, seed, train_ratio)
+    test_payload = build_split_payload("test", test_records, seed, train_ratio)
+    summary = build_summary(train_records, test_records)
+
+    save_json(output_dir / "train.json", train_payload)
+    save_json(output_dir / "test.json", test_payload)
+    save_json(output_dir / "summary.json", summary)
+    return summary
+
+
+def main() -> None:
+    """
+    用法: main()
+    作用: 命令行入口，构建并保存多模态数据集
+    输入: 无
+    输出: None
+    """
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(args)
+
+    summary = build_multimodal_dataset(
+        rgb_dir=args.rgb_dir,
+        label_json=args.label_json,
+        source_dirs=args.source_dirs,
+        output_dir=args.output_dir,
+        train_ratio=args.train_ratio,
+        seed=args.seed,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

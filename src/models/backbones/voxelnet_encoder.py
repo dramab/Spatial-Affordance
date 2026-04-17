@@ -13,8 +13,8 @@ src/models/backbones/voxelnet_encoder.py
     from src.models.backbones.voxelnet_encoder import VoxelNetEncoder
 
     encoder = VoxelNetEncoder(
-        voxel_size_cm=(2.0, 2.0, 2.0),
-        point_cloud_range_cm=(-80.0, -80.0, -10.0, 80.0, 80.0, 120.0),
+        voxel_size=(0.025, 0.025, 0.025),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
     )
     outputs = encoder(points_xyz, point_feats)
     dense_feats = outputs["dense_voxel_feats"]
@@ -35,15 +35,15 @@ class VoxelGridSpec:
     固定体素网格规格。
 
     输入:
-        voxel_size_cm: Sequence[float] 体素尺寸，顺序为 (x, y, z)
-        point_cloud_range_cm: Sequence[float] 点云范围，
+        voxel_size: Sequence[float] 体素尺寸，顺序为 (x, y, z)
+        point_cloud_range: Sequence[float] 点云范围，
             顺序为 (x_min, y_min, z_min, x_max, y_max, z_max)
     输出:
         VoxelGridSpec 实例
     """
 
-    voxel_size_cm: Tuple[float, float, float]
-    point_cloud_range_cm: Tuple[float, float, float, float, float, float]
+    voxel_size: Tuple[float, float, float]
+    point_cloud_range: Tuple[float, float, float, float, float, float]
 
     @property
     def grid_shape_xyz(self) -> Tuple[int, int, int]:
@@ -55,8 +55,8 @@ class VoxelGridSpec:
         输出:
             (grid_x, grid_y, grid_z)
         """
-        x_min, y_min, z_min, x_max, y_max, z_max = self.point_cloud_range_cm
-        vx, vy, vz = self.voxel_size_cm
+        x_min, y_min, z_min, x_max, y_max, z_max = self.point_cloud_range
+        vx, vy, vz = self.voxel_size
         grid_x = int(round((x_max - x_min) / vx))
         grid_y = int(round((y_max - y_min) / vy))
         grid_z = int(round((z_max - z_min) / vz))
@@ -112,20 +112,20 @@ def _as_6tuple(value: Sequence[float], name: str) -> Tuple[float, float, float, 
 
 
 def build_voxel_grid_spec(
-        voxel_size_cm: Sequence[float] | float,
-        point_cloud_range_cm: Sequence[float]) -> VoxelGridSpec:
+        voxel_size: Sequence[float] | float,
+        point_cloud_range: Sequence[float]) -> VoxelGridSpec:
     """
     构造固定体素网格规格。
 
     输入:
-        voxel_size_cm: float 或 (3,) 体素尺寸，单位 cm
-        point_cloud_range_cm: (6,) 点云空间范围，单位 cm
+        voxel_size: float 或 (3,) 体素尺寸
+        point_cloud_range: (6,) 点云空间范围
     输出:
         VoxelGridSpec 规格对象
     """
     return VoxelGridSpec(
-        voxel_size_cm=_as_3tuple(voxel_size_cm, "voxel_size_cm"),
-        point_cloud_range_cm=_as_6tuple(point_cloud_range_cm, "point_cloud_range_cm"),
+        voxel_size=_as_3tuple(voxel_size, "voxel_size"),
+        point_cloud_range=_as_6tuple(point_cloud_range, "point_cloud_range"),
     )
 
 
@@ -139,7 +139,7 @@ def voxelize_points(
     将整批场景点云体素化为固定范围的稀疏体素表示。
 
     输入:
-        points_xyz: Tensor(B, N, 3) 点云 xyz，单位 cm
+        points_xyz: Tensor(B, N, 3) 点云 xyz
         point_feats: Tensor(B, N, F) 额外点特征，可为 None
         grid_spec: VoxelGridSpec 固定体素网格规格
         max_points_per_voxel: int 每个体素保留的最多点数
@@ -168,8 +168,8 @@ def voxelize_points(
         raise ValueError("point_feats must align with points_xyz on batch and point dims")
 
     spec = grid_spec
-    vx, vy, vz = spec.voxel_size_cm
-    x_min, y_min, z_min, x_max, y_max, z_max = spec.point_cloud_range_cm
+    vx, vy, vz = spec.voxel_size
+    x_min, y_min, z_min, x_max, y_max, z_max = spec.point_cloud_range
 
     feat_dim = 6 + (0 if point_feats is None else int(point_feats.shape[-1]))
     device = points_xyz.device
@@ -490,7 +490,7 @@ class VoxelNetEncoder(nn.Module):
     基于 VoxelNet 前半段结构的稠密体素编码器。
 
     输入:
-        points_xyz: Tensor(B, N, 3) 场景点云坐标，单位 cm
+        points_xyz: Tensor(B, N, 3) 场景点云坐标
         point_feats: Tensor(B, N, F) 额外点特征，可为 None
     输出:
         dict，包含 dense_voxel_feats、valid_mask、sparse_voxel_feats、
@@ -499,8 +499,8 @@ class VoxelNetEncoder(nn.Module):
 
     def __init__(
             self,
-            voxel_size_cm: Sequence[float] | float,
-            point_cloud_range_cm: Sequence[float],
+            voxel_size: Sequence[float] | float = (0.025, 0.025, 0.025),
+            point_cloud_range: Sequence[float] = (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
             max_points_per_voxel: int = 32,
             max_voxels: int = 20000,
             input_feature_dim: int = 6,
@@ -509,7 +509,7 @@ class VoxelNetEncoder(nn.Module):
             cml_channels: Sequence[int] = (128, 256, 256),
             return_dense: bool = True):
         super().__init__()
-        self.grid_spec = build_voxel_grid_spec(voxel_size_cm, point_cloud_range_cm)
+        self.grid_spec = build_voxel_grid_spec(voxel_size, point_cloud_range)
         self.max_points_per_voxel = int(max_points_per_voxel)
         self.max_voxels = int(max_voxels)
         self.return_dense = bool(return_dense)
@@ -533,7 +533,7 @@ class VoxelNetEncoder(nn.Module):
         编码整场景点云为稠密 voxel embedding。
 
         输入:
-            points_xyz: Tensor(B, N, 3) 点云坐标，单位 cm
+            points_xyz: Tensor(B, N, 3) 点云坐标
             point_feats: Tensor(B, N, F) 可选附加特征
         输出:
             dict，至少包含：
@@ -546,7 +546,7 @@ class VoxelNetEncoder(nn.Module):
                 sparse_coords: LongTensor(K, 4)
                     有效体素在稠密网格中的索引，顺序为 (batch_idx, z, y, x)
                 grid_meta: dict 元信息
-                    包含 voxel_size_cm、point_cloud_range_cm、grid_shape_dhw
+                    包含 voxel_size、point_cloud_range、grid_shape_dhw
         """
         voxel_dict = voxelize_points(
             points_xyz=points_xyz,
@@ -586,8 +586,8 @@ class VoxelNetEncoder(nn.Module):
             "points_per_batch": voxel_dict["points_per_batch"],
             "dropped_points": voxel_dict["dropped_points"],
             "grid_meta": {
-                "voxel_size_cm": self.grid_spec.voxel_size_cm,
-                "point_cloud_range_cm": self.grid_spec.point_cloud_range_cm,
+                "voxel_size": self.grid_spec.voxel_size,
+                "point_cloud_range": self.grid_spec.point_cloud_range,
                 "grid_shape_dhw": self.grid_spec.grid_shape_dhw,
             },
         }

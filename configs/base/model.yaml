@@ -11,9 +11,9 @@ image_backbone:
 
 pc_backbone:
   type: "voxelnet"
-  unit: "cm"
-  voxel_size_cm: [2.0, 2.0, 2.0]
-  point_cloud_range_cm: [-80.0, -80.0, -10.0, 80.0, 80.0, 120.0]
+  unit: "normalized"
+  voxel_size: [0.025, 0.025, 0.025]
+  point_cloud_range: [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
   max_points_per_voxel: 32
   max_voxels: 20000
   input_feature_dim: 6

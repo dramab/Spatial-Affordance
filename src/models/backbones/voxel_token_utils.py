@@ -26,25 +26,25 @@ from typing import Dict, Tuple
 import torch
 
 
-def _compute_voxel_centers_cm(
+def _compute_voxel_centers(
         coords_bzyx: torch.Tensor,
-        voxel_size_cm: Tuple[float, float, float],
-        point_cloud_range_cm: Tuple[float, float, float, float, float, float]) -> torch.Tensor:
+        voxel_size: Tuple[float, float, float],
+        point_cloud_range: Tuple[float, float, float, float, float, float]) -> torch.Tensor:
     """
-    将体素索引转换为体素中心的世界坐标。
+    将体素索引转换为体素中心坐标。
 
     输入:
         coords_bzyx: Tensor(K, 4) 体素索引，顺序为 (batch, z, y, x)
-        voxel_size_cm: (3,) 体素尺寸
-        point_cloud_range_cm: (6,) 点云空间范围
+        voxel_size: (3,) 体素尺寸
+        point_cloud_range: (6,) 点云空间范围
     输出:
         Tensor(K, 3) 体素中心坐标，顺序为 (x, y, z)
     """
     if coords_bzyx.shape[0] == 0:
         return coords_bzyx.new_zeros((0, 3), dtype=torch.float32)
 
-    vx, vy, vz = (float(v) for v in voxel_size_cm)
-    x_min, y_min, z_min, _, _, _ = (float(v) for v in point_cloud_range_cm)
+    vx, vy, vz = (float(v) for v in voxel_size)
+    x_min, y_min, z_min, _, _, _ = (float(v) for v in point_cloud_range)
     x = x_min + (coords_bzyx[:, 3].to(torch.float32) + 0.5) * vx
     y = y_min + (coords_bzyx[:, 2].to(torch.float32) + 0.5) * vy
     z = z_min + (coords_bzyx[:, 1].to(torch.float32) + 0.5) * vz
@@ -61,11 +61,11 @@ def flatten_voxel_grid_for_transformer(
     输入:
         dense_voxel_feats: Tensor(B, C, D, H, W) 稠密体素特征
         valid_mask: BoolTensor(B, 1, D, H, W) 有效体素 mask
-        grid_meta: dict，包含 voxel_size_cm 与 point_cloud_range_cm
+        grid_meta: dict，包含 voxel_size 与 point_cloud_range
     输出:
         dict，包含：
         - voxel_tokens: Tensor(K, C) 展平后的有效体素特征
-        - voxel_coords_cm: Tensor(K, 3) 体素中心坐标 (x, y, z)，单位 cm
+        - voxel_coords: Tensor(K, 3) 体素中心坐标 (x, y, z)
         - token_mask: BoolTensor(K,) 有效 token 掩码（恒为 True）
         - sparse_coords: LongTensor(K, 4) 稀疏体素索引 (batch, z, y, x)
     """
@@ -78,44 +78,44 @@ def flatten_voxel_grid_for_transformer(
     sparse_coords = torch.stack([batch_idx, z_idx, y_idx, x_idx], dim=-1)
     voxel_tokens = dense_voxel_feats[batch_idx, :, z_idx, y_idx, x_idx]
     voxel_tokens = voxel_tokens.to(torch.float32)
-    voxel_coords_cm = _compute_voxel_centers_cm(
+    voxel_coords = _compute_voxel_centers(
         sparse_coords,
-        tuple(grid_meta["voxel_size_cm"]),
-        tuple(grid_meta["point_cloud_range_cm"]),
+        tuple(grid_meta["voxel_size"]),
+        tuple(grid_meta["point_cloud_range"]),
     ).to(dense_voxel_feats.device)
     token_mask = torch.ones(
         (voxel_tokens.shape[0],), dtype=torch.bool, device=dense_voxel_feats.device)
 
     return {
         "voxel_tokens": voxel_tokens,
-        "voxel_coords_cm": voxel_coords_cm,
+        "voxel_coords": voxel_coords,
         "token_mask": token_mask,
         "sparse_coords": sparse_coords,
     }
 
 
 def _normalize_voxel_coords(
-        voxel_coords_cm: torch.Tensor,
-        point_cloud_range_cm: Tuple[float, float, float, float, float, float]) -> torch.Tensor:
+        voxel_coords: torch.Tensor,
+        point_cloud_range: Tuple[float, float, float, float, float, float]) -> torch.Tensor:
     """
     将体素中心坐标归一化到 [-1, 1]。
 
     输入:
-        voxel_coords_cm: Tensor(K, 3) 体素中心坐标，顺序为 (x, y, z)
-        point_cloud_range_cm: (6,) 点云空间范围
+        voxel_coords: Tensor(K, 3) 体素中心坐标，顺序为 (x, y, z)
+        point_cloud_range: (6,) 点云空间范围
     输出:
         Tensor(K, 3) 归一化坐标
     """
-    if voxel_coords_cm.shape[0] == 0:
-        return voxel_coords_cm.new_zeros((0, 3), dtype=torch.float32)
+    if voxel_coords.shape[0] == 0:
+        return voxel_coords.new_zeros((0, 3), dtype=torch.float32)
 
     x_min, y_min, z_min, x_max, y_max, z_max = (
-        float(v) for v in point_cloud_range_cm
+        float(v) for v in point_cloud_range
     )
-    mins = voxel_coords_cm.new_tensor([x_min, y_min, z_min], dtype=torch.float32)
-    maxs = voxel_coords_cm.new_tensor([x_max, y_max, z_max], dtype=torch.float32)
+    mins = voxel_coords.new_tensor([x_min, y_min, z_min], dtype=torch.float32)
+    maxs = voxel_coords.new_tensor([x_max, y_max, z_max], dtype=torch.float32)
     spans = (maxs - mins).clamp_min(1e-6)
-    normalized = (voxel_coords_cm.to(torch.float32) - mins) / spans
+    normalized = (voxel_coords.to(torch.float32) - mins) / spans
     return normalized * 2.0 - 1.0
 
 
@@ -129,13 +129,13 @@ def build_padded_voxel_tokens(
     输入:
         dense_voxel_feats: Tensor(B, C, D, H, W) 稠密体素特征
         valid_mask: BoolTensor(B, 1, D, H, W) 有效体素 mask
-        grid_meta: dict，包含 voxel_size_cm 与 point_cloud_range_cm
+        grid_meta: dict，包含 voxel_size 与 point_cloud_range
     输出:
         dict，包含：
         - tokens: Tensor(B, L, C) batch-first 体素 token
         - token_mask: BoolTensor(B, L) True 表示有效 token
         - token_pos: Tensor(B, L, 3) 归一化体素中心坐标
-        - token_coords_cm: Tensor(B, L, 3) 原始体素中心坐标（cm）
+        - token_coords: Tensor(B, L, 3) 原始体素中心坐标
         - sparse_coords: LongTensor(B, L, 4) 稀疏体素索引，padding 为 -1
         - token_counts: LongTensor(B,) 每个 batch 的有效 token 数
     """
@@ -152,27 +152,27 @@ def build_padded_voxel_tokens(
 
     tokens = dense_voxel_feats.new_zeros((batch_size, max_tokens, channels))
     token_mask = torch.zeros((batch_size, max_tokens), dtype=torch.bool, device=device)
-    token_coords_cm = dense_voxel_feats.new_zeros((batch_size, max_tokens, 3), dtype=torch.float32)
+    token_coords = dense_voxel_feats.new_zeros((batch_size, max_tokens, 3), dtype=torch.float32)
     token_pos = dense_voxel_feats.new_zeros((batch_size, max_tokens, 3), dtype=torch.float32)
     sparse_coords = torch.full((batch_size, max_tokens, 4), -1, dtype=torch.long, device=device)
 
     offset = 0
-    point_cloud_range_cm = tuple(grid_meta["point_cloud_range_cm"])
+    point_cloud_range = tuple(grid_meta["point_cloud_range"])
     for batch_idx in range(batch_size):
         count = int(token_counts[batch_idx].item())
         if count == 0:
             continue
         next_offset = offset + count
         batch_tokens = flat_dict["voxel_tokens"][offset:next_offset]
-        batch_coords_cm = flat_dict["voxel_coords_cm"][offset:next_offset]
+        batch_coords = flat_dict["voxel_coords"][offset:next_offset]
         batch_sparse_coords = flat_dict["sparse_coords"][offset:next_offset]
 
         tokens[batch_idx, :count] = batch_tokens
         token_mask[batch_idx, :count] = True
-        token_coords_cm[batch_idx, :count] = batch_coords_cm
+        token_coords[batch_idx, :count] = batch_coords
         token_pos[batch_idx, :count] = _normalize_voxel_coords(
-            batch_coords_cm,
-            point_cloud_range_cm=point_cloud_range_cm,
+            batch_coords,
+            point_cloud_range=point_cloud_range,
         )
         sparse_coords[batch_idx, :count] = batch_sparse_coords
         offset = next_offset
@@ -181,7 +181,7 @@ def build_padded_voxel_tokens(
         "tokens": tokens,
         "token_mask": token_mask,
         "token_pos": token_pos,
-        "token_coords_cm": token_coords_cm,
+        "token_coords": token_coords,
         "sparse_coords": sparse_coords,
         "token_counts": token_counts,
     }

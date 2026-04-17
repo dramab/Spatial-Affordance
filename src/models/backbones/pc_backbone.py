@@ -12,8 +12,8 @@ src/models/backbones/pc_backbone.py
     backbone = PCBackbone(
         {
             "type": "voxelnet",
-            "voxel_size_cm": [2.0, 2.0, 2.0],
-            "point_cloud_range_cm": [-80.0, -80.0, -10.0, 80.0, 80.0, 120.0],
+            "voxel_size": [0.025, 0.025, 0.025],
+            "point_cloud_range": [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
         }
     )
     outputs = backbone(points_xyz, point_feats)
@@ -63,12 +63,11 @@ class PCBackbone(nn.Module):
         if backbone_type != "voxelnet":
             raise ValueError(f"unsupported pc backbone type: {backbone_type}")
 
-        voxel_size_cm = _cfg_get(cfg, "voxel_size_cm", (2.0, 2.0, 2.0))
-        point_cloud_range_cm = _cfg_get(
+        voxel_size = _cfg_get(cfg, "voxel_size", (0.025, 0.025, 0.025))
+        point_cloud_range = _cfg_get(
             cfg,
-            "point_cloud_range_cm",
-            # (x_min, y_min, z_min, x_max, y_max, z_max)，单位 cm
-            (-80.0, -80.0, -10.0, 80.0, 80.0, 120.0),
+            "point_cloud_range",
+            (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
         )
         max_points_per_voxel = int(_cfg_get(cfg, "max_points_per_voxel", 32))
         max_voxels = int(_cfg_get(cfg, "max_voxels", 20000))
@@ -79,8 +78,8 @@ class PCBackbone(nn.Module):
         return_dense = bool(_cfg_get(cfg, "return_dense", True))
 
         self.backbone = VoxelNetEncoder(
-            voxel_size_cm=voxel_size_cm,
-            point_cloud_range_cm=point_cloud_range_cm,
+            voxel_size=voxel_size,
+            point_cloud_range=point_cloud_range,
             max_points_per_voxel=max_points_per_voxel,
             max_voxels=max_voxels,
             input_feature_dim=input_feature_dim,

@@ -88,8 +88,8 @@ def _make_model_cfg() -> dict:
         },
         "pc_backbone": {
             "type": "voxelnet",
-            "voxel_size_cm": [5.0, 5.0, 5.0],
-            "point_cloud_range_cm": [-20.0, -20.0, -20.0, 20.0, 20.0, 20.0],
+            "voxel_size": [0.25, 0.25, 0.25],
+            "point_cloud_range": [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
             "max_points_per_voxel": 8,
             "max_voxels": 256,
             "input_feature_dim": 6,
@@ -133,16 +133,16 @@ def _make_points_batch() -> torch.Tensor:
         Tensor(B, N, 3) 点云坐标
     """
     sample_a = torch.tensor([
-        [-10.0, -10.0, -10.0],
-        [-5.0, -5.0, -5.0],
+        [-1.0, -1.0, -1.0],
+        [-0.5, -0.5, -0.5],
         [0.0, 0.0, 0.0],
-        [5.0, 5.0, 5.0],
+        [0.5, 0.5, 0.5],
     ])
     sample_b = torch.tensor([
-        [-8.0, -4.0, -2.0],
-        [-4.0, -2.0, 0.0],
-        [4.0, 2.0, 6.0],
-        [8.0, 4.0, 8.0],
+        [-0.8, -0.4, -0.2],
+        [-0.4, -0.2, 0.0],
+        [0.4, 0.2, 0.6],
+        [0.8, 0.4, 0.8],
     ])
     return torch.stack([sample_a, sample_b], dim=0).to(torch.float32)
 

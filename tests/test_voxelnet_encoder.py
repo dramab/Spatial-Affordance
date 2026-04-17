@@ -38,9 +38,9 @@ def _make_points_batch(num_points: int, scale: float = 1.0) -> torch.Tensor:
         num_points: int 每轴采样数
         scale: float 立方体边长缩放系数
     输出:
-        Tensor(1, N, 3) 单 batch 点云，单位 cm
+        Tensor(1, N, 3) 单 batch normalized 点云
     """
-    axis = torch.linspace(-10.0 * scale, 10.0 * scale, steps=num_points)
+    axis = torch.linspace(-1.0 * scale, 1.0 * scale, steps=num_points)
     xx, yy, zz = torch.meshgrid(axis, axis, axis, indexing="ij")
     pts = torch.stack([xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)], dim=-1)
     return pts.unsqueeze(0)
@@ -56,11 +56,11 @@ def test_voxelize_points_discards_out_of_range_points():
         无，通过断言验证结果
     """
     points_xyz = torch.tensor([
-        [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [100.0, 100.0, 100.0]]
+        [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1], [1.2, 1.2, 1.2]]
     ], dtype=torch.float32)
     spec = build_voxel_grid_spec(
-        voxel_size_cm=(2.0, 2.0, 2.0),
-        point_cloud_range_cm=(-10.0, -10.0, -10.0, 10.0, 10.0, 10.0),
+        voxel_size=(0.25, 0.25, 0.25),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
     )
     voxel_dict = voxelize_points(
         points_xyz=points_xyz,
@@ -73,7 +73,25 @@ def test_voxelize_points_discards_out_of_range_points():
     assert int(voxel_dict["dropped_points"][0].item()) == 1
     assert voxel_dict["voxel_coords"].shape[0] == 1
     assert voxel_dict["voxel_num_points"].tolist() == [2]
-    assert voxel_dict["voxel_coords"][0].tolist() == [0, 5, 5, 5]
+    assert voxel_dict["voxel_coords"][0].tolist() == [0, 4, 4, 4]
+
+
+def test_build_voxel_grid_spec_uses_normalized_defaults():
+    """
+    验证 normalized 默认网格参数可以导出 80x80x80 的体素网格。
+
+    输入:
+        无
+    输出:
+        无，通过断言验证结果
+    """
+    spec = build_voxel_grid_spec(
+        voxel_size=(0.025, 0.025, 0.025),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
+    )
+
+    assert spec.grid_shape_xyz == (80, 80, 80)
+    assert spec.grid_shape_dhw == (80, 80, 80)
 
 
 def test_voxelnet_encoder_returns_stable_dense_shape():
@@ -86,21 +104,21 @@ def test_voxelnet_encoder_returns_stable_dense_shape():
         无，通过断言验证结果
     """
     encoder = VoxelNetEncoder(
-        voxel_size_cm=(5.0, 5.0, 5.0),
-        point_cloud_range_cm=(-20.0, -20.0, -20.0, 20.0, 20.0, 20.0),
+        voxel_size=(0.25, 0.25, 0.25),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
         max_points_per_voxel=16,
         max_voxels=256,
         input_feature_dim=6,
-        svfe_hidden_channels=32,
-        svfe_out_channels=64,
-        cml_channels=(64, 64),
+        svfe_hidden_channels=8,
+        svfe_out_channels=8,
+        cml_channels=(8,),
     )
 
     out_small = encoder(_make_points_batch(3))
     out_large = encoder(_make_points_batch(5))
 
     assert out_small["dense_voxel_feats"].shape == out_large["dense_voxel_feats"].shape
-    assert out_small["dense_voxel_feats"].shape == (1, 64, 8, 8, 8)
+    assert out_small["dense_voxel_feats"].shape == (1, 8, 8, 8, 8)
     assert out_small["valid_mask"].shape == (1, 1, 8, 8, 8)
 
 
@@ -113,12 +131,12 @@ def test_scale_sensitive_voxelization_changes_occupied_extent():
     输出:
         无，通过断言验证结果
     """
-    small_points = _make_points_batch(4, scale=1.0)
-    large_points = _make_points_batch(4, scale=2.0)
+    small_points = _make_points_batch(4, scale=0.5)
+    large_points = _make_points_batch(4, scale=1.0)
 
     spec = build_voxel_grid_spec(
-        voxel_size_cm=(5.0, 5.0, 5.0),
-        point_cloud_range_cm=(-30.0, -30.0, -30.0, 30.0, 30.0, 30.0),
+        voxel_size=(0.25, 0.25, 0.25),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
     )
     small_voxels = voxelize_points(
         points_xyz=small_points,
@@ -151,8 +169,8 @@ def test_flatten_voxel_grid_for_transformer_matches_valid_mask():
         无，通过断言验证结果
     """
     encoder = VoxelNetEncoder(
-        voxel_size_cm=(5.0, 5.0, 5.0),
-        point_cloud_range_cm=(-20.0, -20.0, -20.0, 20.0, 20.0, 20.0),
+        voxel_size=(0.25, 0.25, 0.25),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
         max_points_per_voxel=8,
         max_voxels=256,
         input_feature_dim=6,
@@ -169,9 +187,11 @@ def test_flatten_voxel_grid_for_transformer_matches_valid_mask():
 
     valid_count = int(outputs["valid_mask"].sum().item())
     assert token_dict["voxel_tokens"].shape[0] == valid_count
-    assert token_dict["voxel_coords_cm"].shape == (valid_count, 3)
+    assert token_dict["voxel_coords"].shape == (valid_count, 3)
     assert token_dict["sparse_coords"].shape == (valid_count, 4)
     assert token_dict["token_mask"].dtype == torch.bool
+    assert torch.all(token_dict["voxel_coords"] <= 1.0)
+    assert torch.all(token_dict["voxel_coords"] >= -1.0)
 
 
 def test_pc_backbone_voxelnet_instantiation():
@@ -185,8 +205,8 @@ def test_pc_backbone_voxelnet_instantiation():
     """
     backbone = PCBackbone({
         "type": "voxelnet",
-        "voxel_size_cm": [5.0, 5.0, 5.0],
-        "point_cloud_range_cm": [-20.0, -20.0, -20.0, 20.0, 20.0, 20.0],
+        "voxel_size": [0.25, 0.25, 0.25],
+        "point_cloud_range": [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
         "max_points_per_voxel": 8,
         "max_voxels": 256,
         "input_feature_dim": 6,
@@ -199,6 +219,7 @@ def test_pc_backbone_voxelnet_instantiation():
     assert "dense_voxel_feats" in outputs
     assert "grid_meta" in outputs
     assert outputs["dense_voxel_feats"].shape[1] == 32
+    assert outputs["grid_meta"]["point_cloud_range"] == (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
 
 
 def test_build_padded_voxel_tokens_returns_batch_first_layout():
@@ -211,8 +232,8 @@ def test_build_padded_voxel_tokens_returns_batch_first_layout():
         无，通过断言验证结果
     """
     encoder = VoxelNetEncoder(
-        voxel_size_cm=(5.0, 5.0, 5.0),
-        point_cloud_range_cm=(-20.0, -20.0, -20.0, 20.0, 20.0, 20.0),
+        voxel_size=(0.25, 0.25, 0.25),
+        point_cloud_range=(-1.0, -1.0, -1.0, 1.0, 1.0, 1.0),
         max_points_per_voxel=8,
         max_voxels=256,
         input_feature_dim=6,
@@ -235,11 +256,13 @@ def test_build_padded_voxel_tokens_returns_batch_first_layout():
     assert token_dict["tokens"].shape[0] == 2
     assert token_dict["token_mask"].shape[:2] == token_dict["tokens"].shape[:2]
     assert token_dict["token_pos"].shape[-1] == 3
-    assert token_dict["token_coords_cm"].shape[-1] == 3
+    assert token_dict["token_coords"].shape[-1] == 3
     assert token_dict["sparse_coords"].shape[-1] == 4
     assert token_dict["token_counts"].shape == (2,)
     assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] <= 1.0 + 1e-6)
     assert torch.all(token_dict["token_pos"][token_dict["token_mask"]] >= -1.0 - 1e-6)
+    assert torch.all(token_dict["token_coords"][token_dict["token_mask"]] <= 1.0 + 1e-6)
+    assert torch.all(token_dict["token_coords"][token_dict["token_mask"]] >= -1.0 - 1e-6)
 
     for batch_idx in range(2):
         valid_count = int(token_dict["token_counts"][batch_idx].item())
