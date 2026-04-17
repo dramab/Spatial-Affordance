@@ -8,8 +8,8 @@ tests/test_multimodal_model.py
   验证三模态输入可以被统一编码并输出单 query 3D BBox
 - test_multimodal_model_requires_at_least_one_modality：
   验证所有模态都为空时会抛出错误
-- test_multimodal_model_denormalizes_boxes_with_scene_meta：
-  验证传入场景中心和尺度后，模型会额外输出去归一化 box
+- test_multimodal_model_forward_outputs_normalized_boxes_only：
+  验证模型只输出 normalized box，由外部后处理负责坐标恢复
 
 用法：
     pytest tests/test_multimodal_model.py -v
@@ -182,9 +182,9 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
     assert outputs["memory"].ndim == 3
     assert outputs["memory_mask"].dtype == torch.bool
     assert outputs["decoder_tokens"].shape == (2, 1, 32)
-    assert outputs["pred_boxes"].shape == (2, 1, 7)
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert torch.all(outputs["pred_boxes"][..., 3:6] > 0)
+    assert torch.all(outputs["pred_boxes_norm"][..., 3:6] > 0)
+    assert "pred_boxes" not in outputs
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
     assert outputs["modality_lengths"]["text"] == 6
@@ -218,12 +218,12 @@ def test_multimodal_model_requires_at_least_one_modality(monkeypatch):
         raise AssertionError("expected ValueError when all modality inputs are None")
 
 
-def test_multimodal_model_denormalizes_boxes_with_scene_meta(monkeypatch):
+def test_multimodal_model_forward_outputs_normalized_boxes_only(monkeypatch):
     """
-    作用：验证传入场景标准化元数据后，模型会输出去归一化 box。
+    作用：验证模型前向只输出 normalized box，不在模型内部做坐标恢复。
 
     输入：
-        无，内部构造 mock 文本主干与场景标准化参数
+        无，内部构造 mock 文本主干并执行前向
     输出：
         无，通过断言验证结果
     """
@@ -243,20 +243,13 @@ def test_multimodal_model_denormalizes_boxes_with_scene_meta(monkeypatch):
         "place the mug on the table",
         "move the bowl beside the chair",
     ]
-    box_norm_meta = {
-        "scene_center": torch.tensor([[10.0, 20.0, 30.0], [1.0, 2.0, 3.0]], dtype=torch.float32),
-        "scene_scale": torch.tensor([5.0, 2.0], dtype=torch.float32),
-    }
 
     outputs = model(
         points_xyz=points_xyz,
         images=images,
         text_inputs=text_inputs,
-        box_norm_meta=box_norm_meta,
     )
 
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert outputs["pred_boxes"].shape == (2, 1, 7)
-    assert not torch.allclose(outputs["pred_boxes"], outputs["pred_boxes_norm"])
-    expected_sizes = outputs["pred_boxes_norm"][..., 3:6] * box_norm_meta["scene_scale"].view(2, 1, 1)
-    assert torch.allclose(outputs["pred_boxes"][..., 3:6], expected_sizes, atol=1e-5)
+    assert torch.all(outputs["pred_boxes_norm"][..., 3:6] > 0)
+    assert "pred_boxes" not in outputs
