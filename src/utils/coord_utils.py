@@ -69,6 +69,18 @@ def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     return (T @ pts_h.T).T[:, :3]                        # (N, 3)
 
 
+def wrap_yaw_degrees(yaw_degrees: float) -> float:
+    """
+    将角度包裹到 [-180, 180) 区间。
+
+    输入:
+        yaw_degrees: float 原始角度（度）
+    输出:
+        float 包裹后的角度（度）
+    """
+    return ((float(yaw_degrees) + 180.0) % 360.0) - 180.0
+
+
 def build_camera_scene_normalizer(
         points_world: np.ndarray,
         E_w2c: np.ndarray,
@@ -221,6 +233,37 @@ def denormalize_box_to_aligned(box_norm: np.ndarray, scene_center: np.ndarray, s
     denormalized[..., :3] = denormalized[..., :3] * float(scene_scale) + np.asarray(scene_center, dtype=np.float64)
     denormalized[..., 3:6] = denormalized[..., 3:6] * float(scene_scale)
     return denormalized
+
+
+def box7d_to_corners_world(box7d: np.ndarray) -> np.ndarray:
+    """
+    将世界坐标系下的 yaw-only 7D box 转为 8 个角点。
+
+    输入:
+        box7d: (7,) [cx, cy, cz, l, w, h, yaw_degrees]
+    输出:
+        (8, 3) float64 世界坐标角点
+    """
+    box7d = np.asarray(box7d, dtype=np.float64)
+    if box7d.shape != (7,):
+        raise ValueError(f"box7d must have shape (7,), got {box7d.shape}")
+
+    center_world = box7d[:3]
+    half_size = box7d[3:6] * 0.5
+    yaw_rad = np.deg2rad(float(box7d[6]))
+
+    local_corners = np.array([
+        [-half_size[0], -half_size[1], -half_size[2]],
+        [ half_size[0], -half_size[1], -half_size[2]],
+        [-half_size[0],  half_size[1], -half_size[2]],
+        [ half_size[0],  half_size[1], -half_size[2]],
+        [-half_size[0], -half_size[1],  half_size[2]],
+        [ half_size[0], -half_size[1],  half_size[2]],
+        [-half_size[0],  half_size[1],  half_size[2]],
+        [ half_size[0],  half_size[1],  half_size[2]],
+    ], dtype=np.float64)
+    rotation = rotation_z_3x3(yaw_rad)
+    return local_corners @ rotation.T + center_world[None, :]
 
 
 def build_camera_aligned_scene_normalizer(

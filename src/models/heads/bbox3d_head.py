@@ -53,7 +53,9 @@ class BBox3DHead(nn.Module):
             Tensor(B, Q, 7)
         """
         hidden = self.mlp(decoder_tokens)
-        pred_boxes = self.output(hidden)
-        pred_boxes = pred_boxes.to(torch.float32)
-        pred_boxes[..., 3:6] = F.softplus(pred_boxes[..., 3:6]) + 1e-6
+        raw_boxes = self.output(hidden).to(torch.float32)
+        center = raw_boxes[..., 0:3]
+        size = F.softplus(raw_boxes[..., 3:6]) + 1e-6
+        yaw = raw_boxes[..., 6:7]
+        pred_boxes = torch.cat([center, size, yaw], dim=-1)
         return pred_boxes

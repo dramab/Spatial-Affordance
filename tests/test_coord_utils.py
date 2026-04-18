@@ -22,6 +22,7 @@ import numpy as np
 
 from src.utils.coord_utils import (
     analyze_pose_orientation,
+    box7d_to_corners_world,
     build_camera_scene_normalizer,
     denormalize_box_to_aligned,
     denormalize_points_to_aligned,
@@ -29,6 +30,7 @@ from src.utils.coord_utils import (
     normalize_box_from_aligned,
     normalize_points_world,
     rotation_matrix_from_euler_zyx,
+    wrap_yaw_degrees,
 )
 
 
@@ -264,3 +266,69 @@ def test_camera_aligned_box_normalization_roundtrip():
     restored_box = denormalize_box_to_aligned(box_norm, scene_center, scene_scale)
 
     assert np.allclose(restored_box, box_aligned, atol=1e-6)
+
+
+def test_wrap_yaw_degrees_keeps_angle_in_signed_range():
+    """
+    验证 yaw 角度会被稳定包裹到 [-180, 180)。
+
+    输入:
+        无，内部构造多组超范围角度
+    输出:
+        无，通过断言验证结果
+    """
+    assert wrap_yaw_degrees(270.0) == -90.0
+    assert wrap_yaw_degrees(-190.0) == 170.0
+    assert wrap_yaw_degrees(540.0) == -180.0
+
+
+def test_box7d_to_corners_world_without_rotation():
+    """
+    验证 yaw 为 0° 时，7D box 会生成轴对齐世界坐标角点。
+
+    输入:
+        无，内部构造一个无旋转 box
+    输出:
+        无，通过断言验证结果
+    """
+    box7d = np.array([1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 0.0], dtype=np.float64)
+
+    corners_world = box7d_to_corners_world(box7d)
+    expected = np.array([
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [0.0, 4.0, 0.0],
+        [2.0, 4.0, 0.0],
+        [0.0, 0.0, 6.0],
+        [2.0, 0.0, 6.0],
+        [0.0, 4.0, 6.0],
+        [2.0, 4.0, 6.0],
+    ], dtype=np.float64)
+
+    assert np.allclose(corners_world, expected, atol=1e-6)
+
+
+def test_box7d_to_corners_world_with_ninety_degree_yaw():
+    """
+    验证 yaw 为 90° 时，7D box 会绕世界 Z 轴正确旋转。
+
+    输入:
+        无，内部构造一个中心在原点的 7D box
+    输出:
+        无，通过断言验证结果
+    """
+    box7d = np.array([0.0, 0.0, 0.0, 2.0, 4.0, 2.0, 90.0], dtype=np.float64)
+
+    corners_world = box7d_to_corners_world(box7d)
+    expected = np.array([
+        [2.0, -1.0, -1.0],
+        [2.0, 1.0, -1.0],
+        [-2.0, -1.0, -1.0],
+        [-2.0, 1.0, -1.0],
+        [2.0, -1.0, 1.0],
+        [2.0, 1.0, 1.0],
+        [-2.0, -1.0, 1.0],
+        [-2.0, 1.0, 1.0],
+    ], dtype=np.float64)
+
+    assert np.allclose(corners_world, expected, atol=1e-6)

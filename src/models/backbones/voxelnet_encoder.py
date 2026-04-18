@@ -174,14 +174,15 @@ def voxelize_points(
     feat_dim = 6 + (0 if point_feats is None else int(point_feats.shape[-1]))
     device = points_xyz.device
     dtype = points_xyz.dtype
+    batch_size = int(points_xyz.shape[0])
 
     voxel_features = []
     voxel_coords = []
     voxel_num_points = []
-    points_per_batch = []
-    dropped_points = []
+    points_per_batch = torch.zeros(batch_size, dtype=torch.long, device=device)
+    dropped_points = torch.zeros(batch_size, dtype=torch.long, device=device)
 
-    for batch_idx in range(points_xyz.shape[0]):
+    for batch_idx in range(batch_size):
         xyz = points_xyz[batch_idx]
         extras = None if point_feats is None else point_feats[batch_idx]
 
@@ -194,10 +195,9 @@ def voxelize_points(
         if extras is not None:
             extras = extras[valid]
 
-        dropped_points.append(int((~valid).sum().item()))
+        dropped_points[batch_idx] = (~valid).sum()
 
         if xyz.shape[0] == 0:
-            points_per_batch.append(0)
             continue
 
         coords_x = torch.floor((xyz[:, 0] - x_min) / vx).long()
@@ -211,13 +211,15 @@ def voxelize_points(
             unique_coords = unique_coords[:max_voxels]
             keep_mask = inverse < max_voxels
             xyz = xyz[keep_mask]
-            coords_xyz = coords_xyz[keep_mask]
             inverse = inverse[keep_mask]
             if extras is not None:
                 extras = extras[keep_mask]
         num_voxels = unique_coords.shape[0]
-        points_per_batch.append(int(num_voxels))
+        points_per_batch[batch_idx] = num_voxels
+        if num_voxels == 0 or xyz.shape[0] == 0:
+            continue
 
+        num_points = int(xyz.shape[0])
         voxel_xyz = torch.zeros(
             (num_voxels, max_points_per_voxel, 3), dtype=dtype, device=device)
         voxel_extra = None
@@ -227,31 +229,41 @@ def voxelize_points(
                 dtype=extras.dtype,
                 device=device,
             )
-        point_counts = torch.zeros(num_voxels, dtype=torch.long, device=device)
+        # 先按体素分组并保留输入顺序，再在超限体素内用随机 key 构造无放回采样顺序。
+        point_order = torch.argsort(inverse, stable=True)
+        sorted_inverse = inverse[point_order]
+        point_counts_full = torch.bincount(sorted_inverse, minlength=num_voxels)
+        voxel_start_offsets = torch.cumsum(point_counts_full, dim=0) - point_counts_full
+        local_rank_by_input_order = (
+            torch.arange(num_points, device=device, dtype=torch.long) -
+            voxel_start_offsets[sorted_inverse]
+        )
+        overfull_mask = point_counts_full[sorted_inverse] > max_points_per_voxel
+        random_rank_key = torch.rand(num_points, device=device, dtype=torch.float64)
+        selection_rank_key = torch.where(
+            overfull_mask,
+            random_rank_key,
+            local_rank_by_input_order.to(torch.float64),
+        )
+        combined_rank_key = (
+            sorted_inverse.to(torch.float64) * float(num_points + 1) +
+            selection_rank_key
+        )
+        point_order_by_slot = point_order[torch.argsort(combined_rank_key, stable=True)]
+        voxel_ids_by_slot = inverse[point_order_by_slot]
+        local_slot_index = (
+            torch.arange(num_points, device=device, dtype=torch.long) -
+            voxel_start_offsets[voxel_ids_by_slot]
+        )
+        keep_point_mask = local_slot_index < max_points_per_voxel
+        kept_point_indices = point_order_by_slot[keep_point_mask]
+        kept_voxel_ids = voxel_ids_by_slot[keep_point_mask]
+        kept_slot_indices = local_slot_index[keep_point_mask]
 
-        # 收集每个体素包含的点索引，并随机采样至 max_points_per_voxel
-        voxel_point_indices: list[list[int]] = [[] for _ in range(num_voxels)]
-        for point_idx in range(xyz.shape[0]):
-            voxel_idx = int(inverse[point_idx].item())
-            voxel_point_indices[voxel_idx].append(point_idx)
-
-        for voxel_idx in range(num_voxels):
-            indices = voxel_point_indices[voxel_idx]
-            if len(indices) > max_points_per_voxel:
-                perm = torch.randperm(len(indices), device=device)
-                indices = [indices[i] for i in perm[:max_points_per_voxel].tolist()]
-            for count, point_idx in enumerate(indices):
-                voxel_xyz[voxel_idx, count] = xyz[point_idx]
-                if voxel_extra is not None:
-                    voxel_extra[voxel_idx, count] = extras[point_idx]
-            point_counts[voxel_idx] = len(indices)
-
-        non_empty = point_counts > 0
-        voxel_xyz = voxel_xyz[non_empty]
-        point_counts = point_counts[non_empty]
-        unique_coords = unique_coords[non_empty]
+        point_counts = torch.bincount(kept_voxel_ids, minlength=num_voxels)
+        voxel_xyz[kept_voxel_ids, kept_slot_indices] = xyz[kept_point_indices]
         if voxel_extra is not None:
-            voxel_extra = voxel_extra[non_empty]
+            voxel_extra[kept_voxel_ids, kept_slot_indices] = extras[kept_point_indices]
 
         points_mask = (
             torch.arange(max_points_per_voxel, device=device)[None, :] <
@@ -299,8 +311,8 @@ def voxelize_points(
         "voxel_coords": voxel_coords,
         "voxel_num_points": voxel_num_points,
         "voxel_point_mask": voxel_point_mask,
-        "points_per_batch": torch.tensor(points_per_batch, dtype=torch.long, device=device),
-        "dropped_points": torch.tensor(dropped_points, dtype=torch.long, device=device),
+        "points_per_batch": points_per_batch,
+        "dropped_points": dropped_points,
         "grid_shape_dhw": torch.tensor(spec.grid_shape_dhw, dtype=torch.long, device=device),
     }
 

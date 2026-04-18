@@ -35,7 +35,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from src.utils.coord_utils import normalize_box_from_aligned
+from src.utils.coord_utils import normalize_box_from_aligned, wrap_yaw_degrees
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -113,16 +113,6 @@ def _load_image_tensor(image_path: Path, image_size: tuple[int, int]) -> torch.T
     return torch.from_numpy(np.transpose(image_np, (2, 0, 1)).copy())
 
 
-def _wrap_yaw_degrees(yaw_degrees: float) -> float:
-    """
-    用法: yaw_wrapped = _wrap_yaw_degrees(270.0)
-    作用: 将角度约束到 [-180, 180) 区间
-    输入: yaw_degrees: float，原始角度
-    输出: float，包裹后的角度
-    """
-    return ((float(yaw_degrees) + 180.0) % 360.0) - 180.0
-
-
 def _compute_scene_normalization(
         points_xyz: np.ndarray,
         scale_eps: float) -> tuple[np.ndarray, float]:
@@ -171,7 +161,7 @@ def _normalize_box(
         scene_scale=float(scene_scale),
     )
     box_norm = np.asarray(box_norm, dtype=np.float64)
-    box_norm[6] = _wrap_yaw_degrees(float(target_box[6])) / float(YAW_NORMALIZE_SCALE)
+    box_norm[6] = wrap_yaw_degrees(float(target_box[6])) / float(YAW_NORMALIZE_SCALE)
     return box_norm.astype(np.float32)
 
 

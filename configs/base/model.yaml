@@ -7,12 +7,12 @@ image_backbone:
   type: "resnet50"          # resnet50 | resnet101
   pretrained: true
   out_channels: 256
-  freeze: false
+  freeze: true
 
 pc_backbone:
   type: "voxelnet"
   unit: "normalized"
-  voxel_size: [0.025, 0.025, 0.025]
+  voxel_size: [0.05, 0.05, 0.05]
   point_cloud_range: [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
   max_points_per_voxel: 32
   max_voxels: 20000
@@ -26,7 +26,7 @@ text_encoder:
   type: "roberta-base"
   out_channels: 256
   max_length: 64
-  freeze: false
+  freeze: true
 
 fusion:
   type: "unified_transformer_encoder"

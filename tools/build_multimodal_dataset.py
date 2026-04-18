@@ -3,7 +3,7 @@
 tools/build_multimodal_dataset.py
 ---------------------------------
 将 RGB 可视化图、点云、文本提示与 placement 几何监督整理为统一多模态数据集，
-并生成 train/test 标注清单。
+并生成 train/valid/test 标注清单。
 
 用法:
     python tools/build_multimodal_dataset.py \
@@ -12,13 +12,14 @@ tools/build_multimodal_dataset.py
         --source-dirs outputs/hope outputs/housecat6d \
         --output-dir data/annotations/placement_multimodal \
         --train-ratio 0.8 \
+        --valid-ratio 0.1 \
         --seed 42
 
 作用:
     - 对齐 RGB、文本、点云、placement sample
     - 从原始数据集读取每帧相机参数
     - 基于点云和相机外参预计算 box_norm_meta
-    - 按 source_name 分层随机切分 train/test
+    - 按 source_name 分层随机切分 train/valid/test
 
 输入:
     --rgb-dir: RGB 可视化图片目录
@@ -26,17 +27,21 @@ tools/build_multimodal_dataset.py
     --source-dirs: 一个或多个 placement 输出根目录
     --output-dir: 标注输出目录
     --train-ratio: 训练集比例，默认 0.8
+    --valid-ratio: 验证集比例，默认 0.1
     --seed: 随机种子，默认 42
 
 输出:
     output-dir/
         - train.json
+        - valid.json
         - test.json
         - summary.json
 
 使用示例:
     python tools/build_multimodal_dataset.py \
-        --output-dir data/annotations/placement_multimodal
+        --output-dir data/annotations/placement_multimodal \
+        --train-ratio 0.8 \
+        --valid-ratio 0.1
 """
 
 from __future__ import annotations
@@ -93,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/annotations/placement_multimodal"),
+        default=Path("data/annotations/v1"),
         help="输出标注目录",
     )
     parser.add_argument(
@@ -101,6 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.8,
         help="训练集比例，默认 0.8",
+    )
+    parser.add_argument(
+        "--valid-ratio",
+        type=float,
+        default=0.1,
+        help="验证集比例，默认 0.1",
     )
     parser.add_argument(
         "--seed",
@@ -480,37 +491,51 @@ def enrich_records_with_frame_meta(
 def stratified_split_by_source(
     records: Iterable[dict],
     train_ratio: float,
+    valid_ratio: float,
     seed: int,
-) -> Tuple[List[dict], List[dict]]:
+) -> Tuple[List[dict], List[dict], List[dict]]:
     """
-    用法: train_records, test_records = stratified_split_by_source(records, 0.8, 42)
-    作用: 按 source_name 分层随机切分 train/test
-    输入: records: 样本列表；train_ratio: float；seed: int
-    输出: tuple[list[dict], list[dict]]，训练集与测试集
+    用法: train_records, valid_records, test_records = stratified_split_by_source(records, 0.8, 0.1, 42)
+    作用: 按 source_name 分层随机切分 train/valid/test
+    输入: records: 样本列表；train_ratio: float；valid_ratio: float；seed: int
+    输出: tuple[list[dict], list[dict], list[dict]]，训练集、验证集与测试集
     """
     grouped: Dict[str, List[dict]] = {}
     for record in records:
         grouped.setdefault(record["source_name"], []).append(record)
 
     train_records: List[dict] = []
+    valid_records: List[dict] = []
     test_records: List[dict] = []
     for source_name, source_records in sorted(grouped.items()):
         sorted_records = sorted(source_records, key=lambda x: x["sample_id"])
         rng = random.Random(f"{seed}:{source_name}")
         rng.shuffle(sorted_records)
-        split_idx = int(len(sorted_records) * train_ratio)
-        train_records.extend(sorted_records[:split_idx])
-        test_records.extend(sorted_records[split_idx:])
+        train_end = int(len(sorted_records) * train_ratio)
+        valid_end = int(len(sorted_records) * (train_ratio + valid_ratio))
+        train_records.extend(sorted_records[:train_end])
+        valid_records.extend(sorted_records[train_end:valid_end])
+        test_records.extend(sorted_records[valid_end:])
 
     sorter = lambda x: (x["source_name"], x["sample_id"])
-    return sorted(train_records, key=sorter), sorted(test_records, key=sorter)
+    return (
+        sorted(train_records, key=sorter),
+        sorted(valid_records, key=sorter),
+        sorted(test_records, key=sorter),
+    )
 
 
-def build_split_payload(split_name: str, records: List[dict], seed: int, train_ratio: float) -> dict:
+def build_split_payload(
+    split_name: str,
+    records: List[dict],
+    seed: int,
+    train_ratio: float,
+    valid_ratio: float,
+) -> dict:
     """
-    用法: payload = build_split_payload("train", records, 42, 0.8)
-    作用: 构造 train/test 标注 JSON 顶层结构
-    输入: split_name: str；records: list[dict]；seed: int；train_ratio: float
+    用法: payload = build_split_payload("train", records, 42, 0.8, 0.1)
+    作用: 构造 train/valid/test 标注 JSON 顶层结构
+    输入: split_name: str；records: list[dict]；seed: int；train_ratio: float；valid_ratio: float
     输出: dict，可直接写入 JSON
     """
     return {
@@ -520,6 +545,8 @@ def build_split_payload(split_name: str, records: List[dict], seed: int, train_r
         "split_strategy": {
             "type": "stratified_by_source_random_sample",
             "train_ratio": float(train_ratio),
+            "valid_ratio": float(valid_ratio),
+            "test_ratio": float(1.0 - train_ratio - valid_ratio),
         },
         "sample_count": len(records),
         "samples": records,
@@ -551,11 +578,11 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     }
 
 
-def build_summary(train_records: List[dict], test_records: List[dict]) -> dict:
+def build_summary(train_records: List[dict], valid_records: List[dict], test_records: List[dict]) -> dict:
     """
-    用法: summary = build_summary(train_records, test_records)
-    作用: 汇总 train/test 的样本数与来源分布
-    输入: train_records/test_records: list[dict]
+    用法: summary = build_summary(train_records, valid_records, test_records)
+    作用: 汇总 train/valid/test 的样本数与来源分布
+    输入: train_records/valid_records/test_records: list[dict]
     输出: dict，summary 信息
     """
     def count_by_source(items: Iterable[dict]) -> Dict[str, int]:
@@ -564,15 +591,17 @@ def build_summary(train_records: List[dict], test_records: List[dict]) -> dict:
             counts[item["source_name"]] = counts.get(item["source_name"], 0) + 1
         return dict(sorted(counts.items()))
 
-    all_records = list(train_records) + list(test_records)
+    all_records = list(train_records) + list(valid_records) + list(test_records)
     return {
         "schema_version": SCHEMA_VERSION,
         "total_samples": len(all_records),
         "train_samples": len(train_records),
+        "valid_samples": len(valid_records),
         "test_samples": len(test_records),
         "by_source": {
             "all": count_by_source(all_records),
             "train": count_by_source(train_records),
+            "valid": count_by_source(valid_records),
             "test": count_by_source(test_records),
         },
     }
@@ -599,6 +628,10 @@ def validate_args(args: argparse.Namespace) -> None:
     """
     if not 0.0 < args.train_ratio < 1.0:
         raise ValueError("--train-ratio must be in (0, 1)")
+    if not 0.0 < args.valid_ratio < 1.0:
+        raise ValueError("--valid-ratio must be in (0, 1)")
+    if args.train_ratio + args.valid_ratio >= 1.0:
+        raise ValueError("--train-ratio + --valid-ratio must be less than 1")
 
 
 def build_multimodal_dataset(
@@ -607,13 +640,14 @@ def build_multimodal_dataset(
     source_dirs: Iterable[Path],
     output_dir: Path,
     train_ratio: float,
+    valid_ratio: float,
     seed: int,
 ) -> dict:
     """
-    用法: summary = build_multimodal_dataset(rgb_dir, label_json, source_dirs, output_dir, 0.8, 42)
-    作用: 构建 train/test 多模态数据集并写出 JSON
+    用法: summary = build_multimodal_dataset(rgb_dir, label_json, source_dirs, output_dir, 0.8, 0.1, 42)
+    作用: 构建 train/valid/test 多模态数据集并写出 JSON
     输入: rgb_dir: Path；label_json: Path；source_dirs: Iterable[Path]；
-         output_dir: Path；train_ratio: float；seed: int
+         output_dir: Path；train_ratio: float；valid_ratio: float；seed: int
     输出: dict，summary 信息
     """
     if not rgb_dir.exists():
@@ -634,17 +668,20 @@ def build_multimodal_dataset(
         source_configs=source_configs,
         rgb_dir=rgb_dir,
     )
-    train_records, test_records = stratified_split_by_source(
+    train_records, valid_records, test_records = stratified_split_by_source(
         records=all_records,
         train_ratio=train_ratio,
+        valid_ratio=valid_ratio,
         seed=seed,
     )
 
-    train_payload = build_split_payload("train", train_records, seed, train_ratio)
-    test_payload = build_split_payload("test", test_records, seed, train_ratio)
-    summary = build_summary(train_records, test_records)
+    train_payload = build_split_payload("train", train_records, seed, train_ratio, valid_ratio)
+    valid_payload = build_split_payload("valid", valid_records, seed, train_ratio, valid_ratio)
+    test_payload = build_split_payload("test", test_records, seed, train_ratio, valid_ratio)
+    summary = build_summary(train_records, valid_records, test_records)
 
     save_json(output_dir / "train.json", train_payload)
+    save_json(output_dir / "valid.json", valid_payload)
     save_json(output_dir / "test.json", test_payload)
     save_json(output_dir / "summary.json", summary)
     return summary
@@ -667,6 +704,7 @@ def main() -> None:
         source_dirs=args.source_dirs,
         output_dir=args.output_dir,
         train_ratio=args.train_ratio,
+        valid_ratio=args.valid_ratio,
         seed=args.seed,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

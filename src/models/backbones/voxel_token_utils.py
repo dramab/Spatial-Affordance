@@ -125,20 +125,18 @@ def build_padded_voxel_tokens(
     tokens = dense_voxel_feats.new_zeros((batch_size, max_tokens, channels))
     token_mask = torch.zeros((batch_size, max_tokens), dtype=torch.bool, device=device)
     token_pos = dense_voxel_feats.new_zeros((batch_size, max_tokens, 3), dtype=torch.float32)
-
-    offset = 0
-    for batch_idx in range(batch_size):
-        count = int(token_counts[batch_idx].item())
-        if count == 0:
-            continue
-        next_offset = offset + count
-        batch_tokens = flat_dict["voxel_tokens"][offset:next_offset]
-        batch_coords = flat_dict["voxel_coords"][offset:next_offset]
-
-        tokens[batch_idx, :count] = batch_tokens
-        token_mask[batch_idx, :count] = True
-        token_pos[batch_idx, :count] = batch_coords
-        offset = next_offset
+    num_valid_tokens = int(flat_dict["voxel_tokens"].shape[0])
+    if num_valid_tokens > 0 and max_tokens > 0:
+        batch_indices = flat_dict["sparse_coords"][:, 0].to(torch.long)
+        # flatten 输出天然按 batch 聚合，这里直接恢复每个 token 在各自 batch 内的相对位置。
+        batch_offsets = torch.cumsum(token_counts, dim=0) - token_counts
+        token_indices = (
+            torch.arange(num_valid_tokens, device=device, dtype=torch.long) -
+            batch_offsets[batch_indices]
+        )
+        tokens[batch_indices, token_indices] = flat_dict["voxel_tokens"]
+        token_mask[batch_indices, token_indices] = True
+        token_pos[batch_indices, token_indices] = flat_dict["voxel_coords"]
 
     return {
         "tokens": tokens,
