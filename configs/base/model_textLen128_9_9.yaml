@@ -25,19 +25,19 @@ pc_backbone:
 text_encoder:
   type: "roberta-base"
   out_channels: 256
-  max_length: 64
+  max_length: 128
   freeze: true
 
 fusion:
   type: "unified_transformer_encoder"
-  num_layers: 3
+  num_layers: 9
   num_heads: 8
   hidden_dim: 256
   dropout: 0.1
 
 decoder:
   type: "detr_decoder"
-  num_layers: 3
+  num_layers: 9
   num_heads: 8
   hidden_dim: 256
   dropout: 0.1

@@ -81,6 +81,103 @@ def _make_fake_camera_dict(fx: float = 100.0) -> dict:
     }
 
 
+def _make_transform(
+    translation: tuple[float, float, float],
+    rotation: np.ndarray | None = None,
+) -> list[list[float]]:
+    """
+    用法: transform = _make_transform((1.0, 0.0, 0.0))
+    作用: 构造测试用 object→world 齐次变换
+    输入: translation: tuple[float,float,float]；rotation: 可选 ndarray(3,3)
+    输出: list[list[float]]，可写入 JSON 的 4x4 变换
+    """
+    transform = np.eye(4, dtype=np.float64)
+    if rotation is not None:
+        transform[:3, :3] = np.asarray(rotation, dtype=np.float64)
+    transform[:3, 3] = np.asarray(translation, dtype=np.float64)
+    return transform.tolist()
+
+
+def _make_yaw_transform(
+    translation: tuple[float, float, float],
+    yaw_degrees: float,
+) -> list[list[float]]:
+    """
+    用法: transform = _make_yaw_transform((1.0, 0.0, 0.0), 30.0)
+    作用: 构造带 Z 轴 yaw 的测试用 object→world 变换
+    输入: translation: tuple[float,float,float]；yaw_degrees: float
+    输出: list[list[float]]，可写入 JSON 的 4x4 变换
+    """
+    rotation = build_multimodal_dataset.rotation_z_3x3(np.deg2rad(float(yaw_degrees)))
+    return _make_transform(translation, rotation)
+
+
+def test_compute_yaw_aligned_box_size_uses_transform_without_yaw_inflation():
+    """
+    作用：验证 whl 来自 canonical AABB 与 transform_world，且不会重复计入 yaw 膨胀。
+
+    输入：
+        无
+    输出：
+        无，通过断言验证结果
+    """
+    canonical_aabb = np.array([-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], dtype=np.float64)
+    yaw_rad = np.deg2rad(45.0)
+    cos_yaw, sin_yaw = np.cos(yaw_rad), np.sin(yaw_rad)
+    yaw_rotation = np.array(
+        [
+            [cos_yaw, -sin_yaw, 0.0],
+            [sin_yaw, cos_yaw, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    size = build_multimodal_dataset.compute_yaw_aligned_box_size(
+        canonical_aabb_object=canonical_aabb,
+        transform_world=np.asarray(
+            _make_transform((10.0, 20.0, 30.0), yaw_rotation),
+            dtype=np.float64,
+        ),
+        yaw_degrees=45.0,
+    )
+
+    assert np.allclose(size, [2.0, 4.0, 6.0], atol=1e-6)
+
+
+def test_compute_yaw_aligned_box_size_reflects_sideways_pose():
+    """
+    作用：验证侧放姿态会通过 transform_world 改变训练监督的 whl。
+
+    输入：
+        无
+    输出：
+        无，通过断言验证结果
+    """
+    canonical_aabb = np.array([-1.0, -2.0, -3.0, 1.0, 2.0, 3.0], dtype=np.float64)
+    roll_rad = np.deg2rad(90.0)
+    cos_roll, sin_roll = np.cos(roll_rad), np.sin(roll_rad)
+    roll_rotation = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, cos_roll, -sin_roll],
+            [0.0, sin_roll, cos_roll],
+        ],
+        dtype=np.float64,
+    )
+
+    size = build_multimodal_dataset.compute_yaw_aligned_box_size(
+        canonical_aabb_object=canonical_aabb,
+        transform_world=np.asarray(
+            _make_transform((0.0, 0.0, 0.0), roll_rotation),
+            dtype=np.float64,
+        ),
+        yaw_degrees=0.0,
+    )
+
+    assert np.allclose(size, [2.0, 6.0, 4.0], atol=1e-6)
+
+
 def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch):
     """
     作用：验证脚本会正确对齐多模态数据并写出 train/test/summary。
@@ -125,6 +222,8 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "sample_id": "scene_0000_0000_obj_0_p000",
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
+                    "canonical_aabb_object": [-1, -2, -3, 1, 2, 3],
+                    "transform_world": _make_yaw_transform((0, 0, 0), 15.0),
                     "center_world": [0, 0, 0],
                     "aabb_world": [-1, -2, -3, 1, 2, 3],
                     "yaw_degrees": 15.0,
@@ -133,6 +232,8 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "sample_id": "scene_0000_0000_obj_1_p000",
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
+                    "canonical_aabb_object": [-1, -2, -3, 1, 2, 3],
+                    "transform_world": _make_yaw_transform((1, 0, 0), 30.0),
                     "center_world": [1, 0, 0],
                     "aabb_world": [0, -2, -3, 2, 2, 3],
                     "yaw_degrees": 30.0,
@@ -148,6 +249,8 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "sample_id": "scene01_000000_obj_2_p000",
                     "scene_id": "scene01",
                     "frame_id": "000000",
+                    "canonical_aabb_object": [-1, -2, -2, 1, 2, 2],
+                    "transform_world": _make_yaw_transform((0, 1, 0), 45.0),
                     "center_world": [0, 1, 0],
                     "aabb_world": [-1, -1, -2, 1, 3, 2],
                     "yaw_degrees": 45.0,
@@ -156,6 +259,8 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "sample_id": "scene01_000000_obj_3_p000",
                     "scene_id": "scene01",
                     "frame_id": "000000",
+                    "canonical_aabb_object": [-1, -2, -2, 1, 2, 2],
+                    "transform_world": _make_yaw_transform((0, 2, 0), 60.0),
                     "center_world": [0, 2, 0],
                     "aabb_world": [-1, 0, -2, 1, 4, 2],
                     "yaw_degrees": 60.0,
@@ -225,6 +330,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
         source_dirs=[hope_dir, house_dir],
         output_dir=output_dir,
         train_ratio=0.5,
+        valid_ratio=0.25,
         seed=7,
     )
 
@@ -236,8 +342,10 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
     assert summary["by_source"]["test"] == {"hope": 1, "housecat6d": 1}
 
     train_payload = json.loads((output_dir / "train.json").read_text(encoding="utf-8"))
+    valid_payload = json.loads((output_dir / "valid.json").read_text(encoding="utf-8"))
     test_payload = json.loads((output_dir / "test.json").read_text(encoding="utf-8"))
     assert train_payload["schema_version"] == build_multimodal_dataset.SCHEMA_VERSION
+    assert valid_payload["schema_version"] == build_multimodal_dataset.SCHEMA_VERSION
     assert test_payload["schema_version"] == build_multimodal_dataset.SCHEMA_VERSION
 
     sample = train_payload["samples"][0]
@@ -258,6 +366,22 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
     assert sorted(sample["placement"].keys()) == ["target_box"]
     assert len(sample["placement"]["target_box"]) == 7
     assert sample["placement"]["target_box"][-1] in {15.0, 30.0, 45.0, 60.0}
+
+    samples_by_id = {
+        item["sample_id"]: item
+        for payload in (train_payload, valid_payload, test_payload)
+        for item in payload["samples"]
+    }
+    assert np.allclose(
+        samples_by_id["scene_0000_0000_obj_0_p000"]["placement"]["target_box"][3:6],
+        [2.0, 4.0, 6.0],
+        atol=1e-6,
+    )
+    assert np.allclose(
+        samples_by_id["scene01_000000_obj_2_p000"]["placement"]["target_box"][3:6],
+        [2.0, 4.0, 4.0],
+        atol=1e-6,
+    )
 
 
 def test_build_dataset_raises_on_missing_label(tmp_path, monkeypatch):
@@ -299,6 +423,7 @@ def test_build_dataset_raises_on_missing_label(tmp_path, monkeypatch):
             source_dirs=[hope_dir],
             output_dir=tmp_path / "data/annotations/placement_multimodal",
             train_ratio=0.8,
+            valid_ratio=0.1,
             seed=42,
         )
     except KeyError as exc:

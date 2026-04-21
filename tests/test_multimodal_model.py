@@ -183,7 +183,7 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
     assert outputs["memory_mask"].dtype == torch.bool
     assert outputs["decoder_tokens"].shape == (2, 1, 32)
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert torch.all(outputs["pred_boxes_norm"][..., 3:6] > 0)
+    assert torch.isfinite(outputs["pred_boxes_norm"]).all()
     assert "pred_boxes" not in outputs
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
@@ -251,5 +251,5 @@ def test_multimodal_model_forward_outputs_normalized_boxes_only(monkeypatch):
     )
 
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert torch.all(outputs["pred_boxes_norm"][..., 3:6] > 0)
+    assert torch.isfinite(outputs["pred_boxes_norm"]).all()
     assert "pred_boxes" not in outputs

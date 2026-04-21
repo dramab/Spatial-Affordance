@@ -1,7 +1,7 @@
 """
 src/losses/multimodal_bbox_loss.py
 ----------------------------------
-职责：定义多模态 3D BBox 训练使用的 normalized 7D 回归损失。
+职责：定义多模态 3D BBox 训练使用的 normalized 7D 回归损失，尺寸项采用 log(size_norm)。
 
 用法：
     from src.losses import MultimodalBBoxLoss
@@ -43,7 +43,7 @@ def _squeeze_single_query_boxes(box_tensor: torch.Tensor, tensor_name: str) -> t
 
 class MultimodalBBoxLoss(nn.Module):
     """
-    作用：对 normalized 7D 3D box 计算中心、尺寸与偏航角的加权 Smooth L1 损失。
+    作用：对 normalized 7D 3D box 计算中心、log 尺寸与偏航角的加权 Smooth L1 损失。
 
     输入：
         pred_boxes_norm: Tensor(B, 7) 或 Tensor(B, 1, 7)，模型预测框
@@ -75,7 +75,7 @@ class MultimodalBBoxLoss(nn.Module):
             target_boxes_norm: torch.Tensor) -> dict[str, torch.Tensor]:
         """
         用法: loss_dict = criterion(pred_boxes_norm, target_boxes_norm)
-        作用: 计算 normalized 7D 3D box 的加权回归损失
+        作用: 计算 normalized 7D 3D box 的加权回归损失，尺寸通道语义为 log(size_norm)
         输入: pred_boxes_norm: Tensor(B, 7) 或 Tensor(B, 1, 7)；target_boxes_norm: Tensor(B, 7) 或 Tensor(B, 1, 7)
         输出: dict，包含 loss、center_loss、size_loss、yaw_loss
         """

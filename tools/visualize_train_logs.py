@@ -6,13 +6,16 @@ visualize_train_logs.py
 
 用法:
     conda run -n spatial python visualize_train_logs.py
+    conda run -n spatial python visualize_train_logs.py -l outputs/multimodal_train/train.log -o out.png
+    conda run -n spatial python visualize_train_logs.py -l train.log -l trainv1.log -o compare.png
 
 输出:
-    outputs/multimodal_train/training_curves.png
+    默认保存到 outputs/training_curves.png
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 from typing import Any
@@ -262,11 +265,33 @@ def print_summary_table(logs: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    base_dir = Path("outputs/multimodal_train")
-    log_files = [
-        base_dir / "train.log",
-        base_dir / "trainv1.log",
-    ]
+    """
+    用法: main()
+    作用: 命令行入口，解析参数并绘制训练曲线
+    输入: 命令行参数（通过 argparse）
+    输出: None
+    """
+    parser = argparse.ArgumentParser(description="可视化训练日志")
+    parser.add_argument(
+        "-l", "--log",
+        type=Path,
+        action="append",
+        help="日志文件路径，可多次传入以对比多个日志"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=Path("outputs/training_curves.png"),
+        help="输出图片路径（默认: outputs/training_curves.png）"
+    )
+    args = parser.parse_args()
+
+    if args.log:
+        log_files = args.log
+    else:
+        # 未传参数时使用默认路径
+        base_dir = Path("outputs/multimodal_train")
+        log_files = [base_dir / "train.log", base_dir / "trainv1.log"]
 
     logs = []
     for path in log_files:
@@ -280,9 +305,7 @@ def main() -> None:
         return
 
     print_summary_table(logs)
-
-    output_path = base_dir / "training_curves.png"
-    plot_training_curves(logs, output_path)
+    plot_training_curves(logs, args.output)
 
 
 if __name__ == "__main__":

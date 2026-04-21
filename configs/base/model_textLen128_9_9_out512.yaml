@@ -6,7 +6,7 @@
 image_backbone:
   type: "resnet50"          # resnet50 | resnet101
   pretrained: true
-  out_channels: 256
+  out_channels: 512
   freeze: true
 
 pc_backbone:
@@ -17,27 +17,27 @@ pc_backbone:
   max_points_per_voxel: 32
   max_voxels: 20000
   input_feature_dim: 6
-  svfe_hidden_channels: 32
+  svfe_hidden_channels: 256
   svfe_out_channels: 128
-  cml_channels: [128, 256, 256]
+  cml_channels: [128, 256,512]
   return_dense: true
 
 text_encoder:
   type: "roberta-base"
-  out_channels: 256
-  max_length: 64
+  out_channels: 512
+  max_length: 512
   freeze: true
 
 fusion:
   type: "unified_transformer_encoder"
-  num_layers: 3
+  num_layers: 9
   num_heads: 8
   hidden_dim: 256
   dropout: 0.1
 
 decoder:
   type: "detr_decoder"
-  num_layers: 3
+  num_layers: 9
   num_heads: 8
   hidden_dim: 256
   dropout: 0.1

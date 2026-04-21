@@ -61,6 +61,9 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.annotation.bbox3d.bbox_utils import get_bbox_corners
+from src.utils.coord_utils import rotation_z_3x3, transform_points
+
 SCHEMA_VERSION = "placement_multimodal_dataset/v1"
 DEFAULT_CONFIGS = {
     "hope": PROJECT_ROOT / "configs/annotation/placement.yaml",
@@ -562,8 +565,13 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     """
     center_world = np.asarray(record["center_world"], dtype=np.float64)
     canonical_aabb_object = np.asarray(record["canonical_aabb_object"], dtype=np.float64)
-    box_size = canonical_aabb_object[3:] - canonical_aabb_object[:3]
     yaw_degrees = float(record["yaw_degrees"])
+    transform_world = np.asarray(record["transform_world"], dtype=np.float64)
+    box_size = compute_yaw_aligned_box_size(
+        canonical_aabb_object=canonical_aabb_object,
+        transform_world=transform_world,
+        yaw_degrees=yaw_degrees,
+    )
     target_box = [
         float(center_world[0]),
         float(center_world[1]),
@@ -576,6 +584,39 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     return {
         "target_box": target_box,
     }
+
+
+def compute_yaw_aligned_box_size(
+    canonical_aabb_object: np.ndarray,
+    transform_world: np.ndarray,
+    yaw_degrees: float,
+) -> np.ndarray:
+    """
+    用法: size = compute_yaw_aligned_box_size(canonical_aabb_object, transform_world, yaw_degrees)
+    作用: 由 canonical AABB 和 object→world 姿态计算 yaw 对齐后的 3D box 尺寸
+    输入: canonical_aabb_object: ndarray(6,)；transform_world: ndarray(4,4)；yaw_degrees: float
+    输出: ndarray(3,)，格式为 [size_x, size_y, size_z]
+    """
+    canonical_aabb_object = np.asarray(canonical_aabb_object, dtype=np.float64)
+    transform_world = np.asarray(transform_world, dtype=np.float64)
+    if canonical_aabb_object.shape != (6,):
+        raise ValueError(
+            f"canonical_aabb_object must have shape (6,), got {canonical_aabb_object.shape}"
+        )
+    if transform_world.shape != (4, 4):
+        raise ValueError(f"transform_world must have shape (4, 4), got {transform_world.shape}")
+
+    corners_object = get_bbox_corners(canonical_aabb_object)
+    corners_world = transform_points(corners_object, transform_world)
+    center_world = corners_world.mean(axis=0, dtype=np.float64)
+
+    # 先剥离 yaw，避免 yaw 对世界 AABB 的扩张重复进入尺寸监督。
+    inverse_yaw = rotation_z_3x3(-np.deg2rad(float(yaw_degrees)))
+    corners_yaw_aligned = (corners_world - center_world[None, :]) @ inverse_yaw.T
+    box_size = corners_yaw_aligned.max(axis=0) - corners_yaw_aligned.min(axis=0)
+    if np.any(box_size <= 0.0):
+        raise ValueError(f"computed box size must be positive, got {box_size.tolist()}")
+    return box_size.astype(np.float64)
 
 
 def build_summary(train_records: List[dict], valid_records: List[dict], test_records: List[dict]) -> dict:

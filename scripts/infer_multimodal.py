@@ -14,7 +14,7 @@ scripts/infer_multimodal.py
 作用：
     - 从 checkpoint 读取模型配置与训练时的数据集配置
     - 复用 PlacementMultimodalDataset/placement_multimodal_collate_fn 执行推理
-    - 将 pred_boxes_norm 恢复为世界坐标系 7D box
+    - 将 pred_boxes_norm 恢复为世界坐标系 7D box，尺寸通道按 log(size_norm) 处理
     - 将预测 3D box 投影回 annotation.rgb_path 对应的原尺寸图片
     - 导出 predictions.json 与逐样本可视化图片
 
@@ -307,7 +307,7 @@ def denormalize_world_box(
         yaw_scale: float) -> np.ndarray:
     """
     用法: box_world = denormalize_world_box(box_norm, scene_center, scene_scale, 180.0)
-    作用: 将归一化 7D box 恢复为世界坐标系 box
+    作用: 将归一化 7D box 恢复为世界坐标系 box，尺寸项从 log(size_norm) 恢复
     输入: box_norm: (7,)；scene_center: (3,)；scene_scale: float；yaw_scale: float
     输出: (7,) float64，世界坐标系 7D box
     """
@@ -317,7 +317,7 @@ def denormalize_world_box(
 
     box_world = np.array(box_norm, dtype=np.float64, copy=True)
     box_world[:3] = box_world[:3] * float(scene_scale) + np.asarray(scene_center, dtype=np.float64)
-    box_world[3:6] = box_world[3:6] * float(scene_scale)
+    box_world[3:6] = np.exp(box_world[3:6]) * float(scene_scale)
     box_world[6] = wrap_yaw_degrees(box_world[6] * float(yaw_scale))
     return box_world
 

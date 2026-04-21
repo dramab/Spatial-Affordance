@@ -16,7 +16,6 @@ from typing import List
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 
 class BBox3DHead(nn.Module):
@@ -26,7 +25,7 @@ class BBox3DHead(nn.Module):
     输入：
         decoder_tokens: Tensor(B, Q, H) decoder 输出 token
     输出：
-        Tensor(B, Q, 7)，格式为 (cx, cy, cz, l, w, h, yaw)
+        Tensor(B, Q, 7)，格式为 (cx, cy, cz, log_l, log_w, log_h, yaw)
     """
 
     def __init__(self, hidden_dim: int = 256, num_layers: int = 2, out_dim: int = 7):
@@ -45,7 +44,7 @@ class BBox3DHead(nn.Module):
 
     def forward(self, decoder_tokens: torch.Tensor) -> torch.Tensor:
         """
-        作用：回归 3D BBox 参数，并约束尺寸项为正。
+        作用：回归 normalized 3D BBox 参数，其中尺寸项为 log(size_norm)。
 
         输入：
             decoder_tokens: Tensor(B, Q, H)
@@ -54,8 +53,4 @@ class BBox3DHead(nn.Module):
         """
         hidden = self.mlp(decoder_tokens)
         raw_boxes = self.output(hidden).to(torch.float32)
-        center = raw_boxes[..., 0:3]
-        size = F.softplus(raw_boxes[..., 3:6]) + 1e-6
-        yaw = raw_boxes[..., 6:7]
-        pred_boxes = torch.cat([center, size, yaw], dim=-1)
-        return pred_boxes
+        return raw_boxes

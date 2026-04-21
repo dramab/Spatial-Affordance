@@ -166,12 +166,12 @@ def dump_yaml_config(payload: dict[str, Any], output_path: Path) -> None:
 def initialize_log_file(log_path: Path) -> None:
     """
     用法: initialize_log_file(Path("outputs/run/train.log"))
-    作用: 初始化训练日志文件，确保本次训练从空文件开始记录
+    作用: 初始化训练日志文件，确保日志文件存在且后续内容追加写入
     输入: log_path: Path，日志文件路径
     输出: None
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as f:
+    with log_path.open("a", encoding="utf-8") as f:
         f.write("")
 
 

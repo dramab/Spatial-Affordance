@@ -151,7 +151,7 @@ def _normalize_box(
         scene_scale: float) -> np.ndarray:
     """
     用法: box_norm = _normalize_box(target_box, scene_center, scene_scale)
-    作用: 对 7D 3D box 做平移、尺度与 yaw 归一化
+    作用: 对 7D 3D box 做平移、尺度与 yaw 归一化，尺寸项输出为 log(size_norm)
     输入: target_box: ndarray(7,)；scene_center: ndarray(3,)；scene_scale: float
     输出: ndarray(7,)，归一化后的 3D box
     """
@@ -161,6 +161,9 @@ def _normalize_box(
         scene_scale=float(scene_scale),
     )
     box_norm = np.asarray(box_norm, dtype=np.float64)
+    if np.any(box_norm[3:6] <= 0.0):
+        raise ValueError(f"target_box size_norm must be positive, got {box_norm[3:6].tolist()}")
+    box_norm[3:6] = np.log(box_norm[3:6])
     box_norm[6] = wrap_yaw_degrees(float(target_box[6])) / float(YAW_NORMALIZE_SCALE)
     return box_norm.astype(np.float32)
 

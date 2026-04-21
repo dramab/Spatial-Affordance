@@ -346,6 +346,32 @@ def _build_expected_prediction(annotation_dir: Path, checkpoint_path: Path, samp
     return infer_multimodal.denormalize_world_box(pred_box_norm, scene_center, scene_scale, yaw_scale)
 
 
+def test_denormalize_world_box_exp_recovers_log_size_norm():
+    """
+    作用：验证推理反归一化会用 exp(log_size_norm) 恢复世界尺寸。
+
+    输入：
+        无，内部构造 normalized box 与归一化元信息
+    输出：
+        无，通过断言验证结果
+    """
+    box_norm = np.array(
+        [0.25, -0.5, 0.0, np.log(0.5), np.log(1.0), np.log(1.5), -0.5],
+        dtype=np.float64,
+    )
+    scene_center = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+
+    box_world = infer_multimodal.denormalize_world_box(
+        box_norm=box_norm,
+        scene_center=scene_center,
+        scene_scale=4.0,
+        yaw_scale=180.0,
+    )
+
+    expected_box_world = np.array([2.0, 0.0, 3.0, 2.0, 4.0, 6.0, -90.0], dtype=np.float64)
+    assert np.allclose(box_world, expected_box_world, atol=1e-6)
+
+
 def test_infer_multimodal_exports_predictions_and_visualizations(tmp_path, monkeypatch):
     """
     作用：验证推理脚本会导出 predictions.json、恢复世界坐标框并保存投影图。
