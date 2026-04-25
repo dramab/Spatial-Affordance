@@ -3,7 +3,7 @@
 tools/auto_label.py
 -------------------
 以渲染好的可视化图片为索引，自动为 placement 空位框样本生成自然语言标注。
-结合 3D 物理测距与 2D 视觉方位（8向最大间隙法），生成高精度的空间关系描述。
+结合 3D 物理测距、真实 world box 上下关系判断与 2D 像素中心角度，生成空间关系描述。
 
 ======================== 用法示例 ========================
 python tools/auto_label.py \
@@ -12,26 +12,32 @@ python tools/auto_label.py \
     --output-dir /data/jiajun.xie/Spatial-Affordance/outputs/auto_labels \
     --limit 50
 
+python tools/auto_label.py \
+    --image-dir /data/jiajun.xie/Spatial-Affordance/outputs/placement_rgb_bbox_vis \
+    --outputs-base /data/jiajun.xie/Spatial-Affordance/outputs \
+    --output-dir /data/jiajun.xie/Spatial-Affordance/outputs/auto_labels_selected \
+    --sample-ids scene_0000_0000_obj_3_p000 scene_0000_0000_obj_8_p000
+
 ======================== 参数说明 ========================
 --image-dir:    渲染好的 RGB 图片目录（作为数据驱动的基准，图片名需符合 {source}__{id}.png 规范）
 --outputs-base: JSON 等原始数据的根目录（脚本会去这里找 source_name 对应的 samples/ 和 categories/）
---output-dir:   标注文本 txt、汇总 json 及 report.html 的统一输出目录
+--output-dir:   all_labels.json 和 report.html 的统一输出目录
 --limit:        (可选) 限制处理的图片数量，方便快速测试
---overwrite:    (可选) 覆盖已存在的标注文本
+--sample-ids:   (可选) 指定一个或多个 sample_id，仅生成这些样本
+--sample-ids-file: (可选) 从文本文件读取 sample_id，每行一个，支持与 --sample-ids 同时使用
+--overwrite:    (可选) 兼容旧调用，当前 JSON/HTML 输出会直接刷新
 
 ======================== 输出内容 ========================
-1. 独立的 .txt 文件，包含一句话标注，与图片同名。
-2. all_labels.json，汇总所有成功标注的信息。
-3. report.html，单文件离线网页，内嵌图片和文本，可直接下载到本地浏览器双击查看！
+1. all_labels.json，汇总所有成功标注的信息。
+2. report.html，单文件离线网页，引用图片和文本，可通过 Web 服务查看。
 """
 
 import argparse
-import base64
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 import yaml
 
@@ -40,7 +46,7 @@ PROJECT_ROOT = Path("/data/jiajun.xie/Spatial-Affordance")
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners
-from src.utils.coord_utils import transform_points
+from src.utils.coord_utils import project_world, transform_points
 from src.datasets.hope_adapter import HopeAdapter
 from src.datasets.housecat6d_adapter import HouseCat6DAdapter
 from src.annotation.free_bbox.datatypes import SceneData, ObjectInfo, CameraParams
@@ -49,14 +55,29 @@ from src.annotation.free_bbox.datatypes import SceneData, ObjectInfo, CameraPara
 LABEL_TEMPLATE = "Move {object_name} located at {rel_original} {ref_a_name} to {rel_placement} {ref_b_name}."
 MAPPING_PATH = '/data/wenhao.hai/Spatial-Affordance/tools/api_label/mapping.json'
 
-# 对角线方位融合阈值 (像素差值): 当最大间隙与第二大间隙(属于不同轴)的差值小于该值时，融合为斜向方位
-DIAGONAL_THRESHOLD = 40.0 
+# 上下关系判定阈值：XY 足迹重叠足够大时，才把 Z 方向差异解释为上下关系
+VERTICAL_FOOTPRINT_OVERLAP_RATIO = 0.50
+VERTICAL_TOLERANCE_RATIO = 0.10
+MIN_VERTICAL_TOLERANCE = 1.0
+HORIZONTAL_CENTER_EPS_PX = 1e-6
+AXIS_DIRECTION_HALF_WIDTH_DEG = 15.0
+MIN_VISIBILITY_RATIO = 0.4
+MAX_OCCLUSION_RATIO = 0.5
+SMALL_IMAGE_AREA_THRESHOLD = 2500
+LARGE_IMAGE_AREA_THRESHOLD = 5000
+MAX_REFERENCE_CANDIDATES = 3
 
 GLOBAL_MAPPING_CACHE = None
 CATEGORY_JSON_CACHE = {}
 
 # ===================== 1. 集成的Mapping与名称获取函数 =====================
 def get_mapping():
+    """
+    用法: mapping = get_mapping()
+    作用: 读取并缓存类别名到展示名的映射表。
+    输入: 无，使用全局 MAPPING_PATH。
+    输出: dict，类别名映射表；读取失败时为空 dict。
+    """
     global GLOBAL_MAPPING_CACHE
     if GLOBAL_MAPPING_CACHE is None:
         try:
@@ -70,6 +91,13 @@ def get_mapping():
     return GLOBAL_MAPPING_CACHE
 
 def get_target_object_name(sample_record: dict, source_dir: Path) -> Tuple[str, bool]:
+    """
+    用法: name, found = get_target_object_name(sample_record, source_dir)
+    作用: 从 sample record 中获取目标物体展示名。
+    输入: sample_record 为 placement 样本记录；source_dir 保留兼容旧调用。
+    输出: (object_name, is_found_target)。
+    """
+    del source_dir
     mapping_data = get_mapping()
     target_class_name = sample_record.get('class_name')
     is_found_target = False
@@ -86,6 +114,13 @@ def get_reference_objects_with_names(
     frame_id: str,
     source_dir: Path,
 ) -> Tuple[List[ObjectInfo], List[str]]:
+    """
+    用法: refs, names = get_reference_objects_with_names(adapter, scene_data, frame_id, source_dir)
+    作用: 根据 categories 文件筛选当前帧可作为参照物的 ObjectInfo。
+    输入: 数据集 adapter、场景数据、frame_id 和 source 输出目录。
+    输出: 参照物 ObjectInfo 列表及其展示名列表。
+    """
+    del adapter
     scene_id = scene_data.scene_id
     mapping_data = get_mapping()
     
@@ -128,244 +163,550 @@ def get_reference_objects_with_names(
     return reference_objects, reference_names
 
 
-# ===================== 2. 空间几何计算 (8向最大间隙法) =====================
+# ===================== 2. 空间几何计算 (真实 box + 像素中心角度法) =====================
 def get_camera_aabb(corners_world: np.ndarray, E_w2c: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    用法: cam_min, cam_max = get_camera_aabb(corners_world, E_w2c)
+    作用: 将世界坐标 box 角点变换到相机坐标系并返回 AABB。
+    输入: corners_world 为 (N,3) 世界坐标角点；E_w2c 为 (4,4) world->camera 矩阵。
+    输出: tuple[np.ndarray, np.ndarray]，相机坐标系下的最小点和最大点。
+    """
     corners_homo = np.concatenate([corners_world, np.ones((corners_world.shape[0], 1))], axis=1)
     corners_cam = (E_w2c @ corners_homo.T).T[:, :3]
     return corners_cam.min(axis=0), corners_cam.max(axis=0)
 
 def get_2d_bbox(corners_world: np.ndarray, E_w2c: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    corners_homo = np.concatenate([corners_world, np.ones((corners_world.shape[0], 1))], axis=1)
-    corners_cam = (E_w2c @ corners_homo.T).T[:, :3]
-    corners_img = (K @ corners_cam.T).T
-    
-    z = corners_img[:, 2:3]
-    z[z == 0] = 1e-6 
-    
-    corners_img = corners_img[:, :2] / z
+    """
+    用法: min_uv, max_uv = get_2d_bbox(corners_world, E_w2c, K)
+    作用: 将世界坐标 box 角点投影到像素坐标并返回 2D AABB。
+    输入: corners_world 为 (N,3) 世界角点；E_w2c 为 (4,4)；K 为 (3,3) 内参。
+    输出: tuple[np.ndarray, np.ndarray]，像素坐标最小点和最大点。
+    """
+    corners_img, _ = project_world(corners_world, K, E_w2c)
     return corners_img.min(axis=0), corners_img.max(axis=0)
 
-def check_1d_overlap(min1, max1, min2, max2, margin=0.0):
-    return (min1 - margin) < max2 and (max1 + margin) > min2
-
-# 【新增】计算两个包围盒中心点的欧式距离
 def center_distance(min1: np.ndarray, max1: np.ndarray, min2: np.ndarray, max2: np.ndarray) -> float:
+    """
+    用法: dist = center_distance(min1, max1, min2, max2)
+    作用: 计算两个 AABB 中心点之间的欧氏距离。
+    输入: 两个 AABB 的最小点和最大点。
+    输出: float，中心点距离。
+    """
     center1 = (min1 + max1) / 2.0
     center2 = (min2 + max2) / 2.0
     return float(np.linalg.norm(center1 - center2))
 
-def bbox_distance(min1: np.ndarray, max1: np.ndarray, min2: np.ndarray, max2: np.ndarray) -> float:
-    delta = np.maximum(0.0, np.maximum(min2 - max1, min1 - max2))
-    return float(np.linalg.norm(delta))
+def get_world_aabb(corners_world: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    用法: world_min, world_max = get_world_aabb(corners_world)
+    作用: 从真实世界坐标 box 角点计算 world AABB。
+    输入: corners_world 为 (N,3) 世界坐标角点。
+    输出: tuple[np.ndarray, np.ndarray]，世界坐标最小点和最大点。
+    """
+    corners_world = np.asarray(corners_world, dtype=np.float64)
+    return corners_world.min(axis=0), corners_world.max(axis=0)
+
+def polygon_area_xy(points_xy: np.ndarray) -> float:
+    """
+    用法: area = polygon_area_xy(points_xy)
+    作用: 计算 XY 平面多边形面积。
+    输入: points_xy 为按边界顺序排列的 (N,2) 顶点。
+    输出: float，多边形面积；顶点不足 3 个时为 0。
+    """
+    points_xy = np.asarray(points_xy, dtype=np.float64)
+    if points_xy.shape[0] < 3:
+        return 0.0
+    x = points_xy[:, 0]
+    y = points_xy[:, 1]
+    return float(abs(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))))
+
+def cross_xy(origin: np.ndarray, point_a: np.ndarray, point_b: np.ndarray) -> float:
+    """
+    用法: value = cross_xy(origin, point_a, point_b)
+    作用: 计算二维向量 origin->point_a 与 origin->point_b 的叉积。
+    输入: 三个 (2,) XY 点。
+    输出: float，正值表示 point_b 在 origin->point_a 左侧。
+    """
+    return float(
+        (point_a[0] - origin[0]) * (point_b[1] - origin[1])
+        - (point_a[1] - origin[1]) * (point_b[0] - origin[0])
+    )
+
+def convex_hull_xy(corners_world: np.ndarray) -> np.ndarray:
+    """
+    用法: hull = convex_hull_xy(corners_world)
+    作用: 计算真实 box 角点投影到 XY 平面后的凸包足迹。
+    输入: corners_world 为 (N,3) 世界坐标角点。
+    输出: (M,2) 逆时针凸包顶点；退化时返回去重后的点。
+    """
+    points = np.unique(np.asarray(corners_world, dtype=np.float64)[:, :2], axis=0)
+    if points.shape[0] <= 2:
+        return points
+
+    points = points[np.lexsort((points[:, 1], points[:, 0]))]
+
+    lower = []
+    for point in points:
+        while len(lower) >= 2 and cross_xy(lower[-2], lower[-1], point) <= 0.0:
+            lower.pop()
+        lower.append(point)
+
+    upper = []
+    for point in reversed(points):
+        while len(upper) >= 2 and cross_xy(upper[-2], upper[-1], point) <= 0.0:
+            upper.pop()
+        upper.append(point)
+
+    hull = np.asarray(lower[:-1] + upper[:-1], dtype=np.float64)
+    if hull.shape[0] >= 3 and polygon_signed_area_xy(hull) < 0.0:
+        hull = hull[::-1]
+    return hull
+
+def polygon_signed_area_xy(points_xy: np.ndarray) -> float:
+    """
+    用法: signed_area = polygon_signed_area_xy(points_xy)
+    作用: 计算 XY 多边形有向面积，用于确认顶点方向。
+    输入: points_xy 为按边界顺序排列的 (N,2) 顶点。
+    输出: float，逆时针为正，顺时针为负。
+    """
+    points_xy = np.asarray(points_xy, dtype=np.float64)
+    if points_xy.shape[0] < 3:
+        return 0.0
+    x = points_xy[:, 0]
+    y = points_xy[:, 1]
+    return float(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+def line_intersection_xy(p1: np.ndarray, p2: np.ndarray, e1: np.ndarray, e2: np.ndarray) -> np.ndarray:
+    """
+    用法: point = line_intersection_xy(p1, p2, e1, e2)
+    作用: 计算线段 p1->p2 与裁剪边界 e1->e2 所在直线的交点。
+    输入: 四个 (2,) XY 点。
+    输出: (2,) 交点；近似平行时返回 p2 作为稳定兜底。
+    """
+    segment_vec = p2 - p1
+    edge_vec = e2 - e1
+    denom = segment_vec[0] * edge_vec[1] - segment_vec[1] * edge_vec[0]
+    if abs(float(denom)) < 1e-12:
+        return p2
+    offset = e1 - p1
+    t = (offset[0] * edge_vec[1] - offset[1] * edge_vec[0]) / denom
+    return p1 + t * segment_vec
+
+def polygon_intersection_area_xy(subject_xy: np.ndarray, clip_xy: np.ndarray) -> float:
+    """
+    用法: area = polygon_intersection_area_xy(subject_xy, clip_xy)
+    作用: 用凸多边形裁剪计算两个 XY 足迹的交集面积。
+    输入: 两个逆时针凸多边形顶点数组。
+    输出: float，交集面积。
+    """
+    subject_xy = np.asarray(subject_xy, dtype=np.float64)
+    clip_xy = np.asarray(clip_xy, dtype=np.float64)
+    if subject_xy.shape[0] < 3 or clip_xy.shape[0] < 3:
+        return 0.0
+
+    output = subject_xy
+    for edge_idx in range(clip_xy.shape[0]):
+        edge_start = clip_xy[edge_idx]
+        edge_end = clip_xy[(edge_idx + 1) % clip_xy.shape[0]]
+        input_polygon = output
+        output = []
+        if len(input_polygon) == 0:
+            break
+
+        prev_point = input_polygon[-1]
+        prev_inside = is_left_of_edge(prev_point, edge_start, edge_end)
+        for curr_point in input_polygon:
+            curr_inside = is_left_of_edge(curr_point, edge_start, edge_end)
+            if curr_inside:
+                if not prev_inside:
+                    output.append(line_intersection_xy(prev_point, curr_point, edge_start, edge_end))
+                output.append(curr_point)
+            elif prev_inside:
+                output.append(line_intersection_xy(prev_point, curr_point, edge_start, edge_end))
+            prev_point = curr_point
+            prev_inside = curr_inside
+        output = np.asarray(output, dtype=np.float64)
+
+    return polygon_area_xy(np.asarray(output, dtype=np.float64))
+
+def is_left_of_edge(point_xy: np.ndarray, edge_start: np.ndarray, edge_end: np.ndarray) -> bool:
+    """
+    用法: inside = is_left_of_edge(point_xy, edge_start, edge_end)
+    作用: 判断点是否位于逆时针凸多边形边的内侧。
+    输入: 待测点和边界起止点。
+    输出: bool，True 表示在边左侧或边上。
+    """
+    edge_vec = edge_end - edge_start
+    point_vec = point_xy - edge_start
+    cross = edge_vec[0] * point_vec[1] - edge_vec[1] * point_vec[0]
+    return bool(cross >= -1e-9)
+
+def footprint_overlap_ratio(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+) -> float:
+    """
+    用法: ratio = footprint_overlap_ratio(target_corners_world, ref_corners_world)
+    作用: 计算两个真实 box 在世界 XY 平面足迹上的重叠比例。
+    输入: target/ref 的 (N,3) 世界坐标角点。
+    输出: float，交集面积除以较小足迹面积，范围通常为 [0,1]。
+    """
+    target_hull = convex_hull_xy(target_corners_world)
+    ref_hull = convex_hull_xy(ref_corners_world)
+    inter_area = polygon_intersection_area_xy(target_hull, ref_hull)
+    target_area = polygon_area_xy(target_hull)
+    ref_area = polygon_area_xy(ref_hull)
+    base_area = min(target_area, ref_area)
+    if base_area <= 1e-12:
+        return 0.0
+    return float(inter_area / base_area)
+
+def describe_vertical_relation(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+    overlap_threshold: float = VERTICAL_FOOTPRINT_OVERLAP_RATIO,
+    tolerance_ratio: float = VERTICAL_TOLERANCE_RATIO,
+    min_tolerance: float = MIN_VERTICAL_TOLERANCE,
+) -> Optional[str]:
+    """
+    用法: relation = describe_vertical_relation(target_corners_world, ref_corners_world)
+    作用: 基于真实 world box 自适应判断目标物是否在参照物上方或下方。
+    输入: target/ref 的 (N,3) 世界坐标角点，以及足迹重叠和 Z 方向容差阈值。
+    输出: "the top of"、"below" 或 None；None 表示不属于上下关系。
+    """
+    if footprint_overlap_ratio(target_corners_world, ref_corners_world) < overlap_threshold:
+        return None
+
+    t_min, t_max = get_world_aabb(target_corners_world)
+    r_min, r_max = get_world_aabb(ref_corners_world)
+    target_height = max(float(t_max[2] - t_min[2]), 0.0)
+    ref_height = max(float(r_max[2] - r_min[2]), 0.0)
+    vertical_tolerance = max(float(min_tolerance), float(tolerance_ratio) * min(target_height, ref_height))
+
+    target_center_z = float((t_min[2] + t_max[2]) * 0.5)
+    ref_center_z = float((r_min[2] + r_max[2]) * 0.5)
+    if target_center_z > ref_center_z and t_min[2] >= r_max[2] - vertical_tolerance:
+        return "the top of"
+    if target_center_z < ref_center_z and t_max[2] <= r_min[2] + vertical_tolerance:
+        return "below"
+    return None
+
+def project_box_center_to_pixel(corners_world: np.ndarray, E_w2c: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """
+    用法: center_uv = project_box_center_to_pixel(corners_world, E_w2c, K)
+    作用: 将真实 world box 的中心点投影到像素坐标。
+    输入: corners_world 为 (N,3) 世界坐标角点；E_w2c 为 (4,4)；K 为 (3,3)。
+    输出: np.ndarray，形状为 (2,) 的像素坐标 [u, v]。
+    """
+    center_world = np.asarray(corners_world, dtype=np.float64).mean(axis=0, dtype=np.float64)
+    center_uv, _ = project_world(center_world[None, :], K, E_w2c)
+    return center_uv[0]
+
+def normalize_angle_degrees(angle_deg: float) -> float:
+    """
+    用法: angle = normalize_angle_degrees(angle_deg)
+    作用: 将角度归一化到 [-180, 180) 区间，便于方向扇区判断。
+    输入: angle_deg 为任意角度值。
+    输出: float，归一化后的角度。
+    """
+    return ((float(angle_deg) + 180.0) % 360.0) - 180.0
+
+def describe_angle_relation(
+    angle_deg: float,
+    axis_half_width_deg: float = AXIS_DIRECTION_HALF_WIDTH_DEG,
+) -> str:
+    """
+    用法: relation = describe_angle_relation(angle_deg, axis_half_width_deg)
+    作用: 用非均匀扇区将像素向量角度映射到 8 个水平方向。
+    输入: angle_deg 为像素向量角度；axis_half_width_deg 为单轴方向半宽。
+    输出: str，8 个水平方向之一。
+    """
+    axis_half_width_deg = float(axis_half_width_deg)
+    if not (0.0 < axis_half_width_deg < 45.0):
+        raise ValueError("axis_half_width_deg must be in (0, 45)")
+
+    angle = normalize_angle_degrees(angle_deg)
+    right_min = -axis_half_width_deg
+    right_max = axis_half_width_deg
+    front_min = 90.0 - axis_half_width_deg
+    front_max = 90.0 + axis_half_width_deg
+    back_min = -90.0 - axis_half_width_deg
+    back_max = -90.0 + axis_half_width_deg
+    left_start = 180.0 - axis_half_width_deg
+
+    if right_min <= angle <= right_max:
+        return "the right of"
+    if front_min <= angle <= front_max:
+        return "in front of"
+    if back_min <= angle <= back_max:
+        return "behind"
+    if angle >= left_start or angle < -left_start:
+        return "the left of"
+    if right_max < angle < front_min:
+        return "the front right of"
+    if front_max < angle < left_start:
+        return "the front left of"
+    if -left_start <= angle < back_min:
+        return "the back left of"
+    return "the back right of"
+
+def describe_horizontal_relation_by_pixel_angle(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+    E_w2c: np.ndarray,
+    K: np.ndarray,
+    center_eps_px: float = HORIZONTAL_CENTER_EPS_PX,
+    axis_half_width_deg: float = AXIS_DIRECTION_HALF_WIDTH_DEG,
+) -> str:
+    """
+    用法: relation = describe_horizontal_relation_by_pixel_angle(target_corners_world, ref_corners_world, E_w2c, K)
+    作用: 用两个真实 box 中心的像素投影向量角度判定 8 个水平方向。
+    输入: target/ref 的世界角点、world->camera 外参、相机内参、中心重合阈值和单轴扇区半宽。
+    输出: str，8 个水平方向之一；中心几乎重合时返回 "near"。
+    """
+    target_uv = project_box_center_to_pixel(target_corners_world, E_w2c, K)
+    ref_uv = project_box_center_to_pixel(ref_corners_world, E_w2c, K)
+    delta_uv = target_uv - ref_uv
+    if float(np.linalg.norm(delta_uv)) < float(center_eps_px):
+        return "near"
+
+    angle_deg = float(np.degrees(np.arctan2(delta_uv[1], delta_uv[0])))
+    return describe_angle_relation(angle_deg, axis_half_width_deg=axis_half_width_deg)
+
+def describe_spatial_relation(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+    E_w2c: np.ndarray,
+    K: np.ndarray,
+) -> str:
+    """
+    用法: relation = describe_spatial_relation(target_corners_world, ref_corners_world, E_w2c, K)
+    作用: 先用真实 world box 判断上下关系；不是上下时再用像素中心角度判断水平关系。
+    输入: target/ref 的世界角点、world->camera 外参和相机内参。
+    输出: str，10 类方向关系之一，极端中心重合时为 "near"。
+    """
+    vertical_relation = describe_vertical_relation(target_corners_world, ref_corners_world)
+    if vertical_relation is not None:
+        return vertical_relation
+    return describe_horizontal_relation_by_pixel_angle(target_corners_world, ref_corners_world, E_w2c, K)
+
+def get_object_corners_world(obj: ObjectInfo) -> np.ndarray:
+    """
+    用法: corners = get_object_corners_world(obj)
+    作用: 将 ObjectInfo 的 canonical AABB 通过 pose_world 转为真实 world box 角点。
+    输入: obj 为带 bbox3d_canonical 和 pose_world 的物体信息。
+    输出: (8,3) 世界坐标角点。
+    """
+    return transform_points(_get_bbox_corners(obj.bbox3d_canonical), obj.pose_world)
+
+def infer_image_size_from_camera(camera: CameraParams) -> Tuple[int, int]:
+    """
+    用法: img_w, img_h = infer_image_size_from_camera(camera)
+    作用: 依据相机参数推断当前可视化图片尺寸，保留旧脚本的尺寸兼容逻辑。
+    输入: camera 为相机参数。
+    输出: tuple[int, int]，图像宽高。
+    """
+    est_w = int(camera.K[0, 2] * 2)
+    est_h = int(camera.K[1, 2] * 2)
+    if abs(est_w - 640) < 100 or abs(est_h - 480) < 100:
+        return 640, 480
+    if abs(est_w - 1096) < 150 or abs(est_h - 852) < 150:
+        return 1096, 852
+    return max(640, est_w), max(480, est_h)
+
+def build_reference_projection_info(
+    reference_objects: List[ObjectInfo],
+    E_w2c: np.ndarray,
+    K: np.ndarray,
+) -> Dict[str, dict]:
+    """
+    用法: info_map = build_reference_projection_info(reference_objects, E_w2c, K)
+    作用: 预计算参照物的真实角点、2D bbox 和相机深度，供筛选与遮挡检测复用。
+    输入: 参照物列表、world->camera 矩阵和相机内参。
+    输出: dict，键为 obj_id，值包含 corners_world、min_2d、max_2d、depth 和 obj。
+    """
+    obj_info_map = {}
+    for obj in reference_objects:
+        corners_world = get_object_corners_world(obj)
+        min_2d, max_2d = get_2d_bbox(corners_world, E_w2c, K)
+        depth = get_camera_aabb(corners_world, E_w2c)[0][2]
+        obj_info_map[obj.obj_id] = {
+            "corners_world": corners_world,
+            "min_2d": min_2d,
+            "max_2d": max_2d,
+            "depth": depth,
+            "obj": obj,
+        }
+    return obj_info_map
+
+def compute_projected_box_area(min_2d: np.ndarray, max_2d: np.ndarray) -> float:
+    """
+    用法: area = compute_projected_box_area(min_2d, max_2d)
+    作用: 计算像素坐标 2D bbox 面积。
+    输入: min_2d 和 max_2d 为像素 bbox 的最小/最大坐标。
+    输出: float，非负面积。
+    """
+    box_w = max(0.0, float(max_2d[0] - min_2d[0]))
+    box_h = max(0.0, float(max_2d[1] - min_2d[1]))
+    return box_w * box_h
+
+def compute_image_intersection_area(
+    min_2d: np.ndarray,
+    max_2d: np.ndarray,
+    img_w: int,
+    img_h: int,
+) -> float:
+    """
+    用法: inter_area = compute_image_intersection_area(min_2d, max_2d, img_w, img_h)
+    作用: 计算 2D bbox 与图像画幅的交集面积。
+    输入: 像素 bbox 最小/最大坐标，以及图像宽高。
+    输出: float，位于图像内的 bbox 面积。
+    """
+    inter_xmin = max(float(min_2d[0]), 0.0)
+    inter_ymin = max(float(min_2d[1]), 0.0)
+    inter_xmax = min(float(max_2d[0]), float(img_w))
+    inter_ymax = min(float(max_2d[1]), float(img_h))
+    inter_w = max(0.0, inter_xmax - inter_xmin)
+    inter_h = max(0.0, inter_ymax - inter_ymin)
+    return inter_w * inter_h
+
+def passes_reference_visibility_filter(
+    min_2d: np.ndarray,
+    max_2d: np.ndarray,
+    img_w: int,
+    img_h: int,
+) -> Tuple[bool, float]:
+    """
+    用法: is_visible, area = passes_reference_visibility_filter(min_2d, max_2d, img_w, img_h)
+    作用: 检查候选参照物是否有足够大的画面内可见区域。
+    输入: 候选参照物 2D bbox 和图像尺寸。
+    输出: (bool, float)，是否通过过滤及完整投影 bbox 面积。
+    """
+    area = compute_projected_box_area(min_2d, max_2d)
+    inter_area = compute_image_intersection_area(min_2d, max_2d, img_w, img_h)
+    if inter_area <= 0.0:
+        return False, area
+
+    area_threshold = SMALL_IMAGE_AREA_THRESHOLD if img_w < 800 else LARGE_IMAGE_AREA_THRESHOLD
+    if inter_area < area_threshold:
+        return False, area
+
+    visibility_ratio = inter_area / (area + 1e-6)
+    return visibility_ratio >= MIN_VISIBILITY_RATIO, area
+
+def compute_bbox_overlap_area(
+    min_a: np.ndarray,
+    max_a: np.ndarray,
+    min_b: np.ndarray,
+    max_b: np.ndarray,
+) -> float:
+    """
+    用法: area = compute_bbox_overlap_area(min_a, max_a, min_b, max_b)
+    作用: 计算两个像素 2D bbox 的重叠面积。
+    输入: 两个 bbox 的最小/最大像素坐标。
+    输出: float，重叠面积。
+    """
+    overlap_xmin = max(float(min_a[0]), float(min_b[0]))
+    overlap_ymin = max(float(min_a[1]), float(min_b[1]))
+    overlap_xmax = min(float(max_a[0]), float(max_b[0]))
+    overlap_ymax = min(float(max_a[1]), float(max_b[1]))
+    overlap_w = max(0.0, overlap_xmax - overlap_xmin)
+    overlap_h = max(0.0, overlap_ymax - overlap_ymin)
+    return overlap_w * overlap_h
+
+def compute_occlusion_ratio(
+    ref_id: str,
+    ref_min_2d: np.ndarray,
+    ref_max_2d: np.ndarray,
+    ref_area: float,
+    ref_depth: float,
+    obj_info_map: Dict[str, dict],
+    exclude_id: str = None,
+) -> float:
+    """
+    用法: ratio = compute_occlusion_ratio(ref_id, ref_min_2d, ref_max_2d, ref_area, ref_depth, info_map, exclude_id)
+    作用: 估计候选参照物被更靠近相机的其他参照物遮挡的比例。
+    输入: 当前参照物 id、2D bbox、投影面积、深度、预计算信息和可选排除 id。
+    输出: float，遮挡面积除以参照物投影面积。
+    """
+    occluded_area = 0.0
+    for other_id, other_info in obj_info_map.items():
+        if other_id == ref_id or other_id == exclude_id:
+            continue
+        if other_info["depth"] >= ref_depth:
+            continue
+        occluded_area += compute_bbox_overlap_area(
+            ref_min_2d,
+            ref_max_2d,
+            other_info["min_2d"],
+            other_info["max_2d"],
+        )
+    return occluded_area / (ref_area + 1e-6)
 
 def find_nearest_reference(
     target_corners_world: np.ndarray,
     reference_objects: List[ObjectInfo],
     camera: CameraParams,
     exclude_id: str = None,  
-) -> Tuple[ObjectInfo, str, float]:
-    # 物理3D测距 + 【极其严格的2D可见性过滤】 + 遮挡检测 + 8向视觉方位
+) -> List[Tuple[Optional[ObjectInfo], str, float]]:
+    """
+    用法: candidates = find_nearest_reference(target_corners_world, reference_objects, camera, exclude_id)
+    作用: 经过可见性、遮挡和距离过滤后，为目标 box 选出近邻参照物并计算空间关系。
+    输入: 目标 world box 角点、参照物列表、相机参数和可选排除 obj_id。
+    输出: list[(ObjectInfo|None, relation, distance)]，按参照物候选顺序返回。
+    """
     if not reference_objects:
-        return None, "near", float('inf')
+        return [(None, "near", float('inf'))]
     
     E_w2c = np.linalg.inv(np.asarray(camera.E_c2w, dtype=np.float64))
     K = camera.K
-
-    # 智能判断图像尺寸
-    est_w = int(K[0, 2] * 2)
-    est_h = int(K[1, 2] * 2)
-    if abs(est_w - 640) < 100 or abs(est_h - 480) < 100:
-        img_w, img_h = 640, 480
-    elif abs(est_w - 1096) < 150 or abs(est_h - 852) < 150:
-        img_w, img_h = 1096, 852
-    else:
-        img_w, img_h = max(640, est_w), max(480, est_h)
-
+    img_w, img_h = infer_image_size_from_camera(camera)
     t_min_c, t_max_c = get_camera_aabb(target_corners_world, E_w2c)
-    
-    # ===================== 【修复：安全地预计算所有物体信息】 =====================
-    # 使用字典存储，通过 obj_id 索引，避免列表索引错位
-    obj_info_map = {} 
-    for obj in reference_objects:
-        obj_corners_world = transform_points(_get_bbox_corners(obj.bbox3d_canonical), obj.pose_world)
-        obj_min_2d, obj_max_2d = get_2d_bbox(obj_corners_world, E_w2c, K)
-        obj_depth = get_camera_aabb(obj_corners_world, E_w2c)[0][2]
-        obj_info_map[obj.obj_id] = {
-            "min_2d": obj_min_2d,
-            "max_2d": obj_max_2d,
-            "depth": obj_depth,
-            "obj": obj
-        }
-    # ==================================================================================
+    obj_info_map = build_reference_projection_info(reference_objects, E_w2c, K)
 
     valid_candidates = []
     for ref in reference_objects:
         if exclude_id is not None and ref.obj_id == exclude_id:
             continue
 
-        # 1. 计算3D距离
-        ref_corners_world = transform_points(_get_bbox_corners(ref.bbox3d_canonical), ref.pose_world)
+        ref_info = obj_info_map[ref.obj_id]
+        ref_corners_world = ref_info["corners_world"]
         r_min_c, r_max_c = get_camera_aabb(ref_corners_world, E_w2c)
-        dist = bbox_distance(t_min_c, t_max_c, r_min_c, r_max_c)
+        is_visible, ref_area = passes_reference_visibility_filter(
+            ref_info["min_2d"], ref_info["max_2d"], img_w, img_h
+        )
+        if not is_visible:
+            continue
 
-        # 2. 计算2D包围盒
-        r_min_2d, r_max_2d = get_2d_bbox(ref_corners_world, E_w2c, K)
-        box_w = max(0, r_max_2d[0] - r_min_2d[0])
-        box_h = max(0, r_max_2d[1] - r_min_2d[1])
-        area = box_w * box_h
+        occlusion_ratio = compute_occlusion_ratio(
+            ref_id=ref.obj_id,
+            ref_min_2d=ref_info["min_2d"],
+            ref_max_2d=ref_info["max_2d"],
+            ref_area=ref_area,
+            ref_depth=ref_info["depth"],
+            obj_info_map=obj_info_map,
+            exclude_id=exclude_id,
+        )
+        if occlusion_ratio >= MAX_OCCLUSION_RATIO:
+            continue
 
-        # 3. 【铁律1：物体必须和画面有交集】
-        inter_xmin = max(r_min_2d[0], 0)
-        inter_ymin = max(r_min_2d[1], 0)
-        inter_xmax = min(r_max_2d[0], img_w)
-        inter_ymax = min(r_max_2d[1], img_h)
-        inter_w = max(0, inter_xmax - inter_xmin)
-        inter_h = max(0, inter_ymax - inter_ymin)
-        inter_area = inter_w * inter_h
-
-        if inter_area <= 0:
-            continue  # 完全在画面外，直接排除
-
-        # 4. 【铁律2：物体在画面内的面积必须足够大】
-        area_thresh = 2500 if img_w < 800 else 5000
-        if inter_area < area_thresh:
-            continue  # 在画面里只露出一点点，直接排除
-
-        # 5. 【铁律3：物体的可见比例必须足够高】
-        visibility_ratio = inter_area / (area + 1e-6)
-        if visibility_ratio < 0.4:
-            continue  # 超过60%的部分在画面外或被裁剪，直接排除
-
-        # 6. 【修复：安全的遮挡检测】
-        occluded_area = 0.0
-        ref_depth = obj_info_map[ref.obj_id]["depth"]
-        
-        for other_id, other_info in obj_info_map.items():
-            if other_id == ref.obj_id:
-                continue
-            if other_id == exclude_id:
-                continue
-                
-            other_depth = other_info["depth"]
-            # 只有比它离相机更近的物体才会挡住它
-            if other_depth >= ref_depth:
-                continue
-            
-            other_min = other_info["min_2d"]
-            other_max = other_info["max_2d"]
-            
-            # 计算两个物体2D包围盒的重叠面积
-            overlap_xmin = max(r_min_2d[0], other_min[0])
-            overlap_ymin = max(r_min_2d[1], other_min[1])
-            overlap_xmax = min(r_max_2d[0], other_max[0])
-            overlap_ymax = min(r_max_2d[1], other_max[1])
-            overlap_w = max(0, overlap_xmax - overlap_xmin)
-            overlap_h = max(0, overlap_ymax - overlap_ymin)
-            occluded_area += overlap_w * overlap_h
-
-        occlusion_ratio = occluded_area / (area + 1e-6)
-
-        if occlusion_ratio < 0.5:
-            # 评分 = 1/距离，这样距离越近分数越高
-            # 【修改】使用中心点距离来选择参照物，更符合人类直觉
-            center_dist = center_distance(t_min_c, t_max_c, r_min_c, r_max_c)
-            score = 1.0 / (center_dist + 1e-5)
-            valid_candidates.append((score, center_dist, ref))
+        center_dist = center_distance(t_min_c, t_max_c, r_min_c, r_max_c)
+        score = 1.0 / (center_dist + 1e-5)
+        valid_candidates.append((score, center_dist, ref))
 
     if not valid_candidates:
-        return None, "near", float('inf')
-    # 选择前3个评分最高（距离最近）的物体作为候选
-    valid_candidates.sort(key=lambda x: x[0], reverse=True)
-    top3_candidates = valid_candidates[:3]
-
-# 为每个候选计算对应的方位关系
-    all_candidates = []
-    for score, dist, ref in top3_candidates:
-        ref_corners_world = transform_points(_get_bbox_corners(ref.bbox3d_canonical), ref.pose_world)
-
-    # 2. 判断特殊的上下叠加交互 (真实世界 Z 轴)
-        t_world_min = target_corners_world.min(axis=0)
-        t_world_max = target_corners_world.max(axis=0)
-        r_world_min = ref_corners_world.min(axis=0)
-        r_world_max = ref_corners_world.max(axis=0)
-
-        overlap_x = check_1d_overlap(t_world_min[0], t_world_max[0], r_world_min[0], r_world_max[0])
-        overlap_y = check_1d_overlap(t_world_min[1], t_world_max[1], r_world_min[1], r_world_max[1])
-
-        if overlap_x and overlap_y:
-            if t_world_min[2] >= r_world_max[2] + 0.05:
-                relation = "the top of"
-            elif t_world_max[2] <= r_world_min[2] - 0.05:
-                relation = "below"
-            else:
-                # 3. 基于 2D 相机视角的视觉方位判断
-                t_min_2d, t_max_2d = get_2d_bbox(target_corners_world, E_w2c, K)
-                r_min_2d, r_max_2d = get_2d_bbox(ref_corners_world, E_w2c, K)
-
-                gaps_2d = {
-                    "the left of": r_min_2d[0] - t_max_2d[0],
-                    "the right of": t_min_2d[0] - r_max_2d[0],
-                    "behind": r_min_2d[1] - t_max_2d[1],
-                    "in front of": t_min_2d[1] - r_max_2d[1]
-                }
-            
-                sorted_gaps = sorted(gaps_2d.items(), key=lambda item: item[1], reverse=True)
-                best_dir, best_val = sorted_gaps[0]
-                second_dir, second_val = sorted_gaps[1]
-                relation = best_dir
-
-                x_axes = {"the left of", "the right of"}
-                y_axes = {"behind", "in front of"}
-
-                if (best_val - second_val) < DIAGONAL_THRESHOLD:
-                    if (best_dir in x_axes and second_dir in y_axes) or (best_dir in y_axes and second_dir in x_axes):
-                        dir_set = {best_dir, second_dir}
-                        if dir_set == {"the left of", "in front of"}:
-                            relation = "the front left of"
-                        elif dir_set == {"the right of", "in front of"}:
-                            relation = "the front right of"
-                        elif dir_set == {"the left of", "behind"}:
-                            relation = "the back left of"
-                        elif dir_set == {"the right of", "behind"}:
-                            relation = "the back right of"
-        else:
-            # 3. 基于 2D 相机视角的视觉方位判断
-            t_min_2d, t_max_2d = get_2d_bbox(target_corners_world, E_w2c, K)
-            r_min_2d, r_max_2d = get_2d_bbox(ref_corners_world, E_w2c, K)
-
-            gaps_2d = {
-                "the left of": r_min_2d[0] - t_max_2d[0],
-                "the right of": t_min_2d[0] - r_max_2d[0],
-                "behind": r_min_2d[1] - t_max_2d[1],
-                "in front of": t_min_2d[1] - r_max_2d[1]
-            }
-        
-            sorted_gaps = sorted(gaps_2d.items(), key=lambda item: item[1], reverse=True)
-            best_dir, best_val = sorted_gaps[0]
-            second_dir, second_val = sorted_gaps[1]
-            relation = best_dir
-
-            x_axes = {"the left of", "the right of"}
-            y_axes = {"behind", "in front of"}
-
-            if (best_val - second_val) < DIAGONAL_THRESHOLD:
-                if (best_dir in x_axes and second_dir in y_axes) or (best_dir in y_axes and second_dir in x_axes):
-                    dir_set = {best_dir, second_dir}
-                    if dir_set == {"the left of", "in front of"}:
-                        relation = "the front left of"
-                    elif dir_set == {"the right of", "in front of"}:
-                        relation = "the front right of"
-                    elif dir_set == {"the left of", "behind"}:
-                        relation = "the back left of"
-                    elif dir_set == {"the right of", "behind"}:
-                        relation = "the back right of"
-
-        all_candidates.append((ref, relation, dist))
-
-    if not all_candidates:
         return [(None, "near", float('inf'))]
 
-    return all_candidates
+    valid_candidates.sort(key=lambda x: x[0], reverse=True)
+    top_candidates = valid_candidates[:MAX_REFERENCE_CANDIDATES]
+
+    all_candidates = []
+    for _, dist, ref in top_candidates:
+        ref_corners_world = obj_info_map[ref.obj_id]["corners_world"]
+        relation = describe_spatial_relation(target_corners_world, ref_corners_world, E_w2c, K)
+        all_candidates.append((ref, relation, dist))
+
+    return all_candidates or [(None, "near", float('inf'))]
 
 def calculate_spatial_relation(
     target_corners_world: np.ndarray,
@@ -373,7 +714,12 @@ def calculate_spatial_relation(
     camera: CameraParams,
     exclude_id: str = None,  
 ) -> List[Tuple[str, str]]:
-    # 现在返回多个候选 (relation, ref_name)
+    """
+    用法: relations = calculate_spatial_relation(target_corners_world, reference_objects, camera, exclude_id)
+    作用: 将目标 box 与候选参照物转换为自然语言空间关系和参照物名称。
+    输入: 目标 world box 角点、参照物列表、相机参数和可选排除 obj_id。
+    输出: list[(relation, ref_name)]，用于填充自动标注模板。
+    """
     all_candidates = find_nearest_reference(
         target_corners_world, reference_objects, camera, exclude_id
     )
@@ -396,6 +742,12 @@ def generate_label(
     reference_objects: List[ObjectInfo],
     target_object_name: str,
 ) -> str:
+    """
+    用法: label = generate_label(sample_record, scene_data, reference_objects, target_object_name)
+    作用: 生成单个 placement sample 的自然语言移动指令。
+    输入: sample 记录、场景数据、参照物列表和目标物体展示名。
+    输出: str，完整自然语言标注。
+    """
     canonical_aabb = np.asarray(sample_record["canonical_aabb_object"], dtype=np.float64)
     canonical_corners = _get_bbox_corners(canonical_aabb)
     
@@ -452,177 +804,402 @@ def generate_label(
 
 # ===================== 4. 基于图片的遍历处理逻辑 =====================
 def build_parser() -> argparse.ArgumentParser:
+    """
+    用法: parser = build_parser()
+    作用: 构建 auto_label.py 的命令行参数解析器。
+    输入: 无。
+    输出: argparse.ArgumentParser。
+    """
     parser = argparse.ArgumentParser(description="以图片文件为索引，自动生成对应的 placement 标注")
     parser.add_argument("--image-dir", required=True, type=Path, help="可视化的图片目录 (例如 outputs/placement_rgb_bbox_vis)")
     parser.add_argument("--outputs-base", type=Path, default=PROJECT_ROOT / "outputs", help="数据集的输出基准目录")
-    parser.add_argument("--output-dir", required=True, type=Path, help="标注文件输出目录")
+    parser.add_argument("--output-dir", required=True, type=Path, help="标注 JSON 和 HTML 报告输出目录")
     parser.add_argument("--limit", type=int, default=None, help="仅标注前 N 个样本")
-    parser.add_argument("--overwrite", action="store_true", help="覆盖已存在的标注文件")
+    parser.add_argument("--sample-ids", nargs="+", default=None, help="仅标注指定 sample_id，可一次传入多个")
+    parser.add_argument("--sample-ids-file", type=Path, default=None, help="从文本文件读取 sample_id，每行一个")
+    parser.add_argument("--overwrite", action="store_true", help="兼容旧调用，当前 JSON/HTML 输出会直接刷新")
     return parser
 
+def load_sample_ids_file(sample_ids_file: Path) -> List[str]:
+    """
+    用法: sample_ids = load_sample_ids_file(Path("sample_ids.txt"))
+    作用: 从文本文件读取待标注 sample_id，忽略空行和 # 开头的注释行。
+    输入: sample_ids_file 为 sample_id 文本文件路径。
+    输出: list[str]，按文件顺序返回有效 sample_id。
+    """
+    sample_ids = []
+    with sample_ids_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            sample_id = line.strip()
+            if not sample_id or sample_id.startswith("#"):
+                continue
+            sample_ids.append(sample_id)
+    return sample_ids
+
+def build_sample_id_filter(
+    sample_ids: List[str] = None,
+    sample_ids_file: Path = None,
+) -> Optional[Set[str]]:
+    """
+    用法: sample_id_filter = build_sample_id_filter(args.sample_ids, args.sample_ids_file)
+    作用: 合并命令行和文件中的 sample_id，构建快速过滤集合。
+    输入: sample_ids 为命令行 sample_id 列表；sample_ids_file 为可选文本文件。
+    输出: set[str] 或 None；None 表示不按 sample_id 过滤。
+    """
+    merged_sample_ids = []
+    if sample_ids:
+        merged_sample_ids.extend(str(item).strip() for item in sample_ids if str(item).strip())
+    if sample_ids_file is not None:
+        merged_sample_ids.extend(load_sample_ids_file(sample_ids_file))
+    if not merged_sample_ids:
+        return None
+    return set(merged_sample_ids)
+
 def infer_config_path(source_name: str) -> Path:
+    """
+    用法: config_path = infer_config_path(source_name)
+    作用: 根据数据源名称推断 placement 配置文件路径。
+    输入: source_name 为图片文件名前缀，如 hope 或 housecat6d。
+    输出: Path，对应配置文件路径。
+    """
     if "housecat" in source_name.lower():
         return PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 def load_scene_cached(scene_cache: Dict, adapter, source_dir: Path, scene_id: str, frame_id: str):
+    """
+    用法: scene = load_scene_cached(scene_cache, adapter, source_dir, scene_id, frame_id)
+    作用: 按 source/scene/frame 缓存加载场景，避免重复读取同一帧。
+    输入: 场景缓存、数据集 adapter、source 目录、scene_id 和 frame_id。
+    输出: SceneData 场景对象。
+    """
     key = (source_dir.name, scene_id, frame_id)
     if key not in scene_cache:
         scene_path = Path(adapter.root_dir) / scene_id
         scene_cache[key] = adapter.load_scene(str(scene_path), frame_id)
     return scene_cache[key]
 
+def parse_image_filename(image_path: Path) -> Optional[Tuple[str, str]]:
+    """
+    用法: parsed = parse_image_filename(Path("hope__scene_0000_0000_obj_1_p000.png"))
+    作用: 从可视化图片文件名解析 source_name 和 sample_id。
+    输入: image_path 为图片路径，文件名需符合 {source}__{sample_id}.png。
+    输出: (source_name, sample_id) 或 None。
+    """
+    parts = image_path.stem.split("__", 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return None
+    return parts[0], parts[1]
+
+def collect_image_files(image_dir: Path) -> List[Path]:
+    """
+    用法: image_files = collect_image_files(image_dir)
+    作用: 收集图片目录下支持的可视化图片。
+    输入: image_dir 为图片目录。
+    输出: 排序后的 png/jpg 图片路径列表。
+    """
+    return sorted(list(image_dir.glob("*.png")) + list(image_dir.glob("*.jpg")))
+
+def filter_image_files_by_sample_ids(
+    image_files: List[Path],
+    sample_id_filter: Optional[Set[str]],
+) -> List[Path]:
+    """
+    用法: filtered = filter_image_files_by_sample_ids(image_files, sample_id_filter)
+    作用: 按 sample_id 集合过滤图片；未指定集合时返回原列表。
+    输入: 图片路径列表和可选 sample_id 集合。
+    输出: 过滤后的图片路径列表。
+    """
+    if sample_id_filter is None:
+        return image_files
+
+    filtered_image_files = []
+    for image_file in image_files:
+        parsed = parse_image_filename(image_file)
+        if parsed is None:
+            continue
+        _, sample_id = parsed
+        if sample_id in sample_id_filter:
+            filtered_image_files.append(image_file)
+    return filtered_image_files
+
+def collect_source_names(image_files: List[Path]) -> Set[str]:
+    """
+    用法: source_names = collect_source_names(image_files)
+    作用: 从图片文件名中收集需要处理的数据源名称。
+    输入: 图片路径列表。
+    输出: set[str]，数据源名称集合。
+    """
+    source_names = set()
+    for image_file in image_files:
+        parsed = parse_image_filename(image_file)
+        if parsed is not None:
+            source_names.add(parsed[0])
+    return source_names
+
+def load_yaml_config(config_path: Path) -> dict:
+    """
+    用法: cfg = load_yaml_config(config_path)
+    作用: 读取 YAML 配置文件。
+    输入: config_path 为 YAML 文件路径。
+    输出: dict，配置内容。
+    """
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+def build_adapter_from_config(ds_cfg: dict):
+    """
+    用法: adapter = build_adapter_from_config(ds_cfg)
+    作用: 根据 dataset 配置构建对应数据集 adapter。
+    输入: ds_cfg 为配置中的 dataset 字段。
+    输出: HopeAdapter 或 HouseCat6DAdapter 实例。
+    """
+    ds_type = ds_cfg.get("type", "hope")
+    if ds_type == "hope":
+        return HopeAdapter(
+            root_dir=ds_cfg["root_dir"],
+            mesh_dir=ds_cfg.get("mesh_dir"),
+            frame_step=ds_cfg.get("frame_step", 60),
+        )
+    if ds_type == "housecat6d":
+        return HouseCat6DAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 60),
+        )
+    raise ValueError(f"不支持的数据集类型: {ds_type}")
+
+def load_sample_lookup(samples_dir: Path) -> Dict[str, dict]:
+    """
+    用法: lookup = load_sample_lookup(samples_dir)
+    作用: 读取 source/samples 下所有 placement sample JSON 并按 sample_id 建索引。
+    输入: samples_dir 为 samples 目录。
+    输出: dict，键为 sample_id，值为 sample record。
+    """
+    lookup = {}
+    if not samples_dir.exists():
+        return lookup
+    for json_file in samples_dir.glob("*.json"):
+        with json_file.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        for record in payload.get("samples", []):
+            lookup[record["sample_id"]] = record
+    return lookup
+
+def build_source_indexes(
+    source_names: Set[str],
+    outputs_base: Path,
+) -> Tuple[Dict[str, Dict[str, dict]], Dict[str, object]]:
+    """
+    用法: lookup_table, adapters = build_source_indexes(source_names, outputs_base)
+    作用: 为本次需要处理的数据源构建 sample 查找表和 adapter。
+    输入: source_names 为数据源名称集合；outputs_base 为 placement 输出根目录。
+    输出: (lookup_table, adapters)，均按 source_name 索引。
+    """
+    lookup_table = {}
+    adapters = {}
+    for source_name in sorted(source_names):
+        source_dir = outputs_base / source_name
+        if not source_dir.exists():
+            continue
+
+        cfg = load_yaml_config(infer_config_path(source_name))
+        adapters[source_name] = build_adapter_from_config(cfg.get("dataset", {}))
+        lookup_table[source_name] = load_sample_lookup(source_dir / "samples")
+    return lookup_table, adapters
+
+def build_label_record(
+    img_file: Path,
+    source_name: str,
+    sample_id: str,
+    sample_record: dict,
+    source_dir: Path,
+    adapter,
+    scene_cache: Dict,
+) -> dict:
+    """
+    用法: record = build_label_record(img_file, source_name, sample_id, sample_record, source_dir, adapter, scene_cache)
+    作用: 为单张图片和 sample record 生成 all_labels.json 中的一条记录。
+    输入: 图片路径、source/sample 信息、数据源目录、adapter 和场景缓存。
+    输出: dict，包含图片名、sample_id、目标名称和生成 label。
+    """
+    scene = load_scene_cached(
+        scene_cache,
+        adapter,
+        source_dir,
+        str(sample_record["scene_id"]),
+        str(sample_record["frame_id"]),
+    )
+    target_object_name, is_found_target = get_target_object_name(sample_record, source_dir)
+    reference_objects, _ = get_reference_objects_with_names(
+        adapter, scene, str(sample_record["frame_id"]), source_dir
+    )
+    label = generate_label(sample_record, scene, reference_objects, target_object_name)
+    return {
+        "image_filename": img_file.name,
+        "sample_id": sample_id,
+        "source_name": source_name,
+        "target_object_name": target_object_name,
+        "is_found_target": is_found_target,
+        "label": label,
+    }
+
+def save_all_labels(output_dir: Path, all_labels: List[dict]) -> Path:
+    """
+    用法: path = save_all_labels(output_dir, all_labels)
+    作用: 保存 all_labels.json 汇总文件。
+    输入: 输出目录和 label 记录列表。
+    输出: Path，写入的 JSON 文件路径。
+    """
+    all_labels_path = output_dir / "all_labels.json"
+    with all_labels_path.open("w", encoding="utf-8") as f:
+        json.dump(all_labels, f, indent=2, ensure_ascii=False)
+    return all_labels_path
+
+def build_report_html(image_dir: Path, output_dir: Path, all_labels: List[dict]) -> str:
+    """
+    用法: html = build_report_html(image_dir, output_dir, all_labels)
+    作用: 构建只读 HTML 标注查看报告。
+    输入: 图片目录、输出目录和 label 记录列表。
+    输出: str，完整 HTML 内容。
+    """
+    html_lines = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>标注查看</title>",
+        "<style>",
+        "  body { font-family: 'Segoe UI', sans-serif; background-color: #f4f4f9; padding: 20px; padding-top: 60px; }",
+        "  .header-bar { position: fixed; top: 0; left: 0; right: 0; background: #2c3e50; color: white; padding: 10px 40px; z-index: 1000; box-shadow: 0 2px 10px rgba(0,0,0,0.3); }",
+        "  .container { max-width: 1200px; margin: auto; }",
+        "  .card { display: flex; background: white; margin-bottom: 15px; padding: 15px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); align-items: center; }",
+        "  .card img { max-width: 380px; max-height: 380px; border-radius: 4px; object-fit: contain; margin-right: 30px; background: #eee; }",
+        "  .info { flex: 1; }",
+        "  .filename { color: #888; font-size: 13px; margin-bottom: 8px; font-family: monospace; }",
+        "  .label { font-size: 20px; font-weight: bold; color: #34495e; line-height: 1.5; }",
+        "  .highlight { color: #e74c3c; }",
+        "</style>",
+        "</head><body>",
+        "<div class='header-bar'>",
+        "  <h2 style='margin:0'>📸 标注查看</h2>",
+        "</div>",
+        "<div class='container'>",
+    ]
+
+    for item in all_labels:
+        img_rel_path = os.path.relpath(image_dir / item["image_filename"], output_dir)
+        fname = item["image_filename"]
+        html_lines.append("  <div class='card'>")
+        html_lines.append(f"    <img src='{img_rel_path}' loading='lazy' />")
+        html_lines.append("    <div class='info'>")
+        html_lines.append(f"      <div class='filename'>📄 {fname}</div>")
+        html_lines.append(f"      <div class='label'>👉 <span class='highlight'>{item['label']}</span></div>")
+        html_lines.append("    </div></div>")
+
+    html_lines.extend(["</div></body></html>"])
+    return "\n".join(html_lines)
+
+def save_report_html(image_dir: Path, output_dir: Path, all_labels: List[dict]) -> Optional[Path]:
+    """
+    用法: report_path = save_report_html(image_dir, output_dir, all_labels)
+    作用: 当存在 label 记录时保存只读 HTML 报告。
+    输入: 图片目录、输出目录和 label 记录列表。
+    输出: Path 或 None；无记录时不生成报告。
+    """
+    if not all_labels:
+        return None
+    report_path = output_dir / "report.html"
+    with report_path.open("w", encoding="utf-8") as f:
+        f.write(build_report_html(image_dir, output_dir, all_labels))
+    return report_path
+
+def print_missing_sample_ids(sample_id_filter: Optional[Set[str]], processed_sample_ids: Set[str]) -> None:
+    """
+    用法: print_missing_sample_ids(sample_id_filter, processed_sample_ids)
+    作用: 打印指定但未成功标注的 sample_id 摘要。
+    输入: 用户指定的 sample_id 集合和已成功处理的 sample_id 集合。
+    输出: None，仅打印提示。
+    """
+    if sample_id_filter is None:
+        return
+    missing_sample_ids = sorted(sample_id_filter - processed_sample_ids)
+    if not missing_sample_ids:
+        return
+    preview = ", ".join(missing_sample_ids[:20])
+    suffix = " ..." if len(missing_sample_ids) > 20 else ""
+    print(f"未成功标注的指定 sample_id ({len(missing_sample_ids)}): {preview}{suffix}")
+
 def auto_label_from_images(
-    image_dir: Path, outputs_base: Path, output_dir: Path, limit: int = None, overwrite: bool = False
+    image_dir: Path,
+    outputs_base: Path,
+    output_dir: Path,
+    limit: int = None,
+    overwrite: bool = False,
+    sample_id_filter: Optional[Set[str]] = None,
 ) -> int:
+    """
+    用法: count = auto_label_from_images(image_dir, outputs_base, output_dir, sample_id_filter={"sample_a"})
+    作用: 以可视化图片为索引生成自动标注，可选只处理指定 sample_id。
+    输入: 图片目录、placement 输出根目录、标注输出目录、limit、overwrite 和 sample_id 过滤集合。
+    输出: int，实际成功标注的样本数量。
+    """
+    del overwrite
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    image_files = sorted(list(image_dir.glob("*.png")) + list(image_dir.glob("*.jpg")))
+
+    image_files = collect_image_files(image_dir)
     if not image_files:
         print(f"未在 {image_dir} 中找到任何图片！")
         return 0
 
+    if sample_id_filter is not None:
+        image_files = filter_image_files_by_sample_ids(image_files, sample_id_filter)
+        print(f"指定 sample_id 数量: {len(sample_id_filter)}，匹配到图片: {len(image_files)} 张")
+        if not image_files:
+            missing_preview = ", ".join(sorted(sample_id_filter)[:20])
+            print(f"未找到指定 sample_id 对应的图片: {missing_preview}")
+            return 0
+
     print(f"找到 {len(image_files)} 张图片，开始构建数据索引...")
-
-    lookup_table = {}  
-    adapters = {}
-    
-    source_names = set()
-    for img_file in image_files:
-        parts = img_file.stem.split('__', 1)
-        if len(parts) == 2:
-            source_names.add(parts[0])
-            
-    for source_name in source_names:
-        source_dir = outputs_base / source_name
-        if not source_dir.exists():
-            continue
-            
-        config_path = infer_config_path(source_name)
-        with config_path.open("r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-        ds_cfg = cfg.get("dataset", {})
-        ds_type = ds_cfg.get("type", "hope")
-        
-        if ds_type == "hope":
-            adapters[source_name] = HopeAdapter(
-                root_dir=ds_cfg["root_dir"], mesh_dir=ds_cfg.get("mesh_dir"), frame_step=ds_cfg.get("frame_step", 60)
-            )
-        elif ds_type == "housecat6d":
-            adapters[source_name] = HouseCat6DAdapter(
-                root_dir=ds_cfg["root_dir"], frame_step=ds_cfg.get("frame_step", 60)
-            )
-            
-        lookup_table[source_name] = {}
-        samples_dir = source_dir / "samples"
-        if samples_dir.exists():
-            for json_file in samples_dir.glob("*.json"):
-                with json_file.open("r", encoding="utf-8") as f:
-                    payload = json.load(f)
-                    for record in payload.get("samples", []):
-                        lookup_table[source_name][record["sample_id"]] = record
-
+    lookup_table, adapters = build_source_indexes(collect_source_names(image_files), outputs_base)
     print("数据索引构建完成，开始执行标注...")
 
     scene_cache = {}
     all_labels = []
     labeled = 0
+    processed_sample_ids = set()
 
     for img_file in image_files:
-        parts = img_file.stem.split('__', 1)
-        if len(parts) != 2:
+        parsed = parse_image_filename(img_file)
+        if parsed is None:
             continue
-            
-        source_name = parts[0]  
-        sample_id = parts[1]
-            
+        source_name, sample_id = parsed
+
         if source_name not in lookup_table or sample_id not in lookup_table[source_name]:
             continue
-            
-        sample_record = lookup_table[source_name][sample_id]
-        source_dir = outputs_base / source_name
-        adapter = adapters[source_name]
+        if source_name not in adapters:
+            continue
 
-        scene = load_scene_cached(
-            scene_cache, adapter, source_dir, str(sample_record["scene_id"]), str(sample_record["frame_id"])
+        all_labels.append(
+            build_label_record(
+                img_file=img_file,
+                source_name=source_name,
+                sample_id=sample_id,
+                sample_record=lookup_table[source_name][sample_id],
+                source_dir=outputs_base / source_name,
+                adapter=adapters[source_name],
+                scene_cache=scene_cache,
+            )
         )
-        
-        target_object_name, is_found_target = get_target_object_name(sample_record, source_dir)
-        reference_objects, _ = get_reference_objects_with_names(
-            adapter, scene, str(sample_record["frame_id"]), source_dir
-        )
-        label = generate_label(sample_record, scene, reference_objects, target_object_name)
-            
-        all_labels.append({
-            "image_filename": img_file.name,
-            "sample_id": sample_id,
-            "source_name": source_name,
-            "target_object_name": target_object_name,
-            "is_found_target": is_found_target,
-            "label": label,
-        })
-        
+
         labeled += 1
+        processed_sample_ids.add(sample_id)
         if labeled % 50 == 0:
             print(f"已标注 {labeled} 张图片，最新: {img_file.name}")
         if limit is not None and labeled >= limit:
             break
 
-    all_labels_path = output_dir / "all_labels.json"
-    with all_labels_path.open("w", encoding="utf-8") as f:
-        json.dump(all_labels, f, indent=2, ensure_ascii=False)
-
-    # ==========================================
-    # 【生成HTML 报告】
-    # ==========================================                                                                        
-        # ==========================================
-    # 【简化版】只读 HTML 报告（无交互）
-    # ==========================================
+    print_missing_sample_ids(sample_id_filter, processed_sample_ids)
+    save_all_labels(output_dir, all_labels)
     if all_labels:
         print("\n正在生成只读 HTML 报告...")
-        html_lines = [
-            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>标注查看</title>",
-            "<style>",
-            "  body { font-family: 'Segoe UI', sans-serif; background-color: #f4f4f9; padding: 20px; padding-top: 60px; }",
-            "  .header-bar { position: fixed; top: 0; left: 0; right: 0; background: #2c3e50; color: white; padding: 10px 40px; z-index: 1000; box-shadow: 0 2px 10px rgba(0,0,0,0.3); }",
-            "  .container { max-width: 1200px; margin: auto; }",
-            "  .card { display: flex; background: white; margin-bottom: 15px; padding: 15px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); align-items: center; }",
-            "  .card img { max-width: 380px; max-height: 380px; border-radius: 4px; object-fit: contain; margin-right: 30px; background: #eee; }",
-            "  .info { flex: 1; }",
-            "  .filename { color: #888; font-size: 13px; margin-bottom: 8px; font-family: monospace; }",
-            "  .label { font-size: 20px; font-weight: bold; color: #34495e; line-height: 1.5; }",
-            "  .highlight { color: #e74c3c; }",
-            "</style>",
-            "</head><body>",
-            "<div class='header-bar'>",
-            "  <h2 style='margin:0'>📸 标注查看</h2>",
-            "</div>",
-            "<div class='container'>"
-        ]
-        
-        for item in all_labels:
-            img_rel_path = os.path.relpath(image_dir / item["image_filename"], output_dir)
-            fname = item["image_filename"]
-            html_lines.append(f"  <div class='card'>")
-            html_lines.append(f"    <img src='{img_rel_path}' loading='lazy' />")
-            html_lines.append(f"    <div class='info'>")
-            html_lines.append(f"      <div class='filename'>📄 {fname}</div>")
-            html_lines.append(f"      <div class='label'>👉 <span class='highlight'>{item['label']}</span></div>")
-            html_lines.append("    </div></div>")
-            
-        html_lines.extend(["</div></body></html>"])
-        report_path = output_dir / "report.html"
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(html_lines))
-            
+        save_report_html(image_dir, output_dir, all_labels)
         print(f"✅ 只读 HTML 报告已生成！请使用 Web 服务查看。")
-
-    # ==========================================
-    # 保存 JSON 汇总
-    # ==========================================
-    all_labels_path = output_dir / "all_labels.json"
-    with all_labels_path.open("w", encoding="utf-8") as f:
-        json.dump(all_labels, f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ 标注完成")
     print(f"实际成功标注: {labeled} 个样本")
@@ -631,19 +1208,29 @@ def auto_label_from_images(
 
 
 def main() -> None:
+    """
+    用法: python tools/auto_label.py --image-dir outputs/placement_rgb_bbox_vis --output-dir outputs/auto_labels
+    作用: 解析命令行参数并执行自动标注主流程。
+    输入: 无，参数来自命令行。
+    输出: None，在终端打印处理结果。
+    """
     args = build_parser().parse_args()
     image_dir = args.image_dir.resolve()
     outputs_base = args.outputs_base.resolve()
     output_dir = args.output_dir.resolve()
+    sample_id_filter = build_sample_id_filter(args.sample_ids, args.sample_ids_file)
     
-    labeled = auto_label_from_images(
-        image_dir=image_dir, outputs_base=outputs_base, output_dir=output_dir, limit=args.limit, overwrite=args.overwrite,
+    auto_label_from_images(
+        image_dir=image_dir,
+        outputs_base=outputs_base,
+        output_dir=output_dir,
+        limit=args.limit,
+        overwrite=args.overwrite,
+        sample_id_filter=sample_id_filter,
     )
     
-    print("\n✅ 标注完成")
     print(f"图片来源目录: {image_dir}")
     print(f"数据索引目录: {outputs_base}")
-    print(f"实际成功标注: {labeled} 个样本")
 
 if __name__ == "__main__":
     
