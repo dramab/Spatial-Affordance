@@ -4,8 +4,8 @@ set -u
 
 CMD=(
 python tools/run_placement.py \
-        --config configs/annotation/placement.yaml \
-        --batch --workers 1 \
+        --config configs/annotation/placement_ycbv_test.yaml \
+        --batch --workers 4 \
         )
 
 RESTART_DELAY="${RESTART_DELAY:-5}"

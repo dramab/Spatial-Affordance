@@ -138,6 +138,15 @@ def build_adapter(cfg: dict):
             frame_step=ds_cfg.get("frame_step", 60),
         )
 
+    if ds_type == "ycb_video":
+        from src.datasets.ycb_video_adapter import YCBVideoAdapter
+        return YCBVideoAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            frame_step=ds_cfg.get("frame_step", 5),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
+
     raise ValueError(f"Unsupported dataset type: {ds_type}")
 
 
@@ -151,6 +160,8 @@ def infer_config_path(input_dir: Path) -> Path:
     name = input_dir.name.lower()
     if "housecat" in name:
         return PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml"
+    if "ycbv" in name or "ycb_video" in name:
+        return PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 

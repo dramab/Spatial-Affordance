@@ -68,6 +68,7 @@ SCHEMA_VERSION = "placement_multimodal_dataset/v1"
 DEFAULT_CONFIGS = {
     "hope": PROJECT_ROOT / "configs/annotation/placement.yaml",
     "housecat6d": PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml",
+    "ycbv_test": PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml",
 }
 
 
@@ -161,6 +162,16 @@ def build_adapter(cfg: dict):
         return HouseCat6DAdapter(
             root_dir=ds_cfg["root_dir"],
             frame_step=ds_cfg.get("frame_step", 60),
+        )
+
+    if ds_type == "ycb_video":
+        from src.datasets.ycb_video_adapter import YCBVideoAdapter
+
+        return YCBVideoAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            frame_step=ds_cfg.get("frame_step", 5),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
         )
 
     raise ValueError(f"Unsupported dataset type: {ds_type}")
@@ -417,6 +428,31 @@ def load_camera_for_frame(source_name: str, source_cfg: Mapping[str, object], sc
         intrinsics = np.loadtxt(intrinsics_path, dtype=np.float64).reshape(3, 3)
         e_c2w = np.loadtxt(camera_pose_path, dtype=np.float64).reshape(4, 4)
         e_c2w[:3, 3] *= 100.0
+        img_w, img_h = Image.open(rgb_path).size
+        return make_camera_serializable(
+            fx=intrinsics[0, 0],
+            fy=intrinsics[1, 1],
+            cx=intrinsics[0, 2],
+            cy=intrinsics[1, 2],
+            img_w=img_w,
+            img_h=img_h,
+            e_c2w=e_c2w,
+        )
+
+    if source_name == "ycbv_test":
+        camera_path = scene_path / "scene_camera.json"
+        rgb_path = scene_path / "rgb" / f"{frame_id}.png"
+        camera_records = load_json(camera_path)
+        camera_record = camera_records[str(int(frame_id))]
+        intrinsics = np.asarray(camera_record["cam_K"], dtype=np.float64).reshape(3, 3)
+        e_w2c = np.eye(4, dtype=np.float64)
+        e_w2c[:3, :3] = np.asarray(
+            camera_record["cam_R_w2c"], dtype=np.float64
+        ).reshape(3, 3)
+        e_w2c[:3, 3] = np.asarray(
+            camera_record["cam_t_w2c"], dtype=np.float64
+        ) * 0.1
+        e_c2w = np.linalg.inv(e_w2c)
         img_w, img_h = Image.open(rgb_path).size
         return make_camera_serializable(
             fx=intrinsics[0, 0],

@@ -125,6 +125,14 @@ def build_adapter(cfg):
             root_dir=ds_cfg["root_dir"],
             frame_step=ds_cfg.get("frame_step", 60),
         )
+    if ds_type == "ycb_video":
+        from src.datasets.ycb_video_adapter import YCBVideoAdapter
+        return YCBVideoAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            frame_step=ds_cfg.get("frame_step", 5),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
     else:
         raise ValueError(f"Unknown dataset type: {ds_type}")
 

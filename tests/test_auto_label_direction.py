@@ -12,6 +12,7 @@ from src.annotation.free_bbox.grid_ops import _get_bbox_corners
 from src.utils.coord_utils import transform_points
 from tools.auto_label import (
     describe_angle_relation,
+    describe_horizontal_relation_by_depth,
     describe_horizontal_relation_by_pixel_angle,
     describe_spatial_relation,
     describe_vertical_relation,
@@ -110,6 +111,34 @@ def test_describe_vertical_relation_allows_adaptive_contact_tolerance():
     assert describe_vertical_relation(target_corners, ref_corners) == "the top of"
 
 
+def test_describe_vertical_relation_allows_bounded_bbox_penetration():
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证支撑关系允许有限 bbox 穿插，适配 bowl 等非实体顶面包围盒。
+    输入: 目标底面低于参照物顶面约 2cm，但中心高度明显更高。
+    输出: 断言目标物仍被判为在参照物上方。
+    """
+    bbox = np.array([-3.0, -3.0, -3.0, 3.0, 3.0, 3.0], dtype=np.float64)
+    target_corners = make_box_corners([0.0, 0.0, 4.0], bbox=bbox)
+    ref_corners = make_box_corners([0.0, 0.0, 0.0], bbox=bbox)
+
+    assert describe_vertical_relation(target_corners, ref_corners) == "the top of"
+
+
+def test_describe_vertical_relation_rejects_excessive_bbox_penetration():
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证穿插超过上限时不会误判为上下支撑关系。
+    输入: 目标底面低于参照物顶面的距离超过允许穿插上限。
+    输出: 断言上下关系为 None。
+    """
+    bbox = np.array([-3.0, -3.0, -3.0, 3.0, 3.0, 3.0], dtype=np.float64)
+    target_corners = make_box_corners([0.0, 0.0, 3.6], bbox=bbox)
+    ref_corners = make_box_corners([0.0, 0.0, 0.0], bbox=bbox)
+
+    assert describe_vertical_relation(target_corners, ref_corners) is None
+
+
 @pytest.mark.parametrize(
     ("target_center", "relation"),
     [
@@ -173,6 +202,47 @@ def test_describe_angle_relation_uses_wide_combined_sectors(angle_deg, relation)
     输出: 断言角度映射关系正确。
     """
     assert describe_angle_relation(angle_deg) == relation
+
+
+@pytest.mark.parametrize(
+    ("target_center", "ref_center", "relation"),
+    [
+        ([5.0, 0.0, 25.0], [0.0, 0.0, 10.0], "the back right of"),
+        ([5.0, 0.0, 21.0], [0.0, 0.0, 20.0], "the right of"),
+        ([-5.0, 0.0, 10.0], [0.0, 0.0, 25.0], "the front left of"),
+    ],
+)
+def test_describe_spatial_relation_uses_camera_depth_for_front_back(
+        target_center, ref_center, relation):
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证主流程使用相机深度差判断前后，而不是使用像素竖直方向。
+    输入: 横向分离的 target/ref 中心，避免触发上下关系。
+    输出: 断言深度感知方向关系正确。
+    """
+    E_w2c, K = make_camera()
+    target_corners = make_box_corners(target_center, bbox=[-0.2, -0.2, -0.2, 0.2, 0.2, 0.2])
+    ref_corners = make_box_corners(ref_center, bbox=[-0.2, -0.2, -0.2, 0.2, 0.2, 0.2])
+
+    actual = describe_spatial_relation(target_corners, ref_corners, E_w2c, K)
+
+    assert actual == relation
+
+
+def test_describe_horizontal_relation_by_depth_returns_near_for_small_offsets():
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证横向和深度差都不足阈值时返回 near。
+    输入: 投影中心横向偏移和相机深度差均很小的两个 box。
+    输出: 断言关系为 near。
+    """
+    E_w2c, K = make_camera()
+    target_corners = make_box_corners([0.05, 0.0, 10.5], bbox=[-0.2, -0.2, -0.2, 0.2, 0.2, 0.2])
+    ref_corners = make_box_corners([0.0, 0.0, 10.0], bbox=[-0.2, -0.2, -0.2, 0.2, 0.2, 0.2])
+
+    actual = describe_horizontal_relation_by_depth(target_corners, ref_corners, E_w2c, K)
+
+    assert actual == "near"
 
 
 def test_describe_spatial_relation_prefers_vertical_before_pixel_angle():

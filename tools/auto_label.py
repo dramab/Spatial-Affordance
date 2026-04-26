@@ -9,19 +9,28 @@ tools/auto_label.py
 python tools/auto_label.py \
     --image-dir /data/jiajun.xie/Spatial-Affordance/outputs/placement_rgb_bbox_vis \
     --outputs-base /data/jiajun.xie/Spatial-Affordance/outputs \
+    --mapping configs/annotation/mappingv2.json
     --output-dir /data/jiajun.xie/Spatial-Affordance/outputs/auto_labels \
     --limit 50
 
 python tools/auto_label.py \
     --image-dir /data/jiajun.xie/Spatial-Affordance/outputs/placement_rgb_bbox_vis \
     --outputs-base /data/jiajun.xie/Spatial-Affordance/outputs \
+    --mapping configs/annotation/mappingv2.json
     --output-dir /data/jiajun.xie/Spatial-Affordance/outputs/auto_labels_selected \
     --sample-ids scene_0000_0000_obj_3_p000 scene_0000_0000_obj_8_p000
+
+python tools/auto_label.py \
+    --image-dir /data/jiajun.xie/Spatial-Affordance/outputs/placement_rgb_bbox_vis \
+    --outputs-base /data/jiajun.xie/Spatial-Affordance/outputs \
+    --output-dir /data/jiajun.xie/Spatial-Affordance/outputs/auto_labels_v2 \
+    --mapping configs/annotation/mappingv2.json
 
 ======================== 参数说明 ========================
 --image-dir:    渲染好的 RGB 图片目录（作为数据驱动的基准，图片名需符合 {source}__{id}.png 规范）
 --outputs-base: JSON 等原始数据的根目录（脚本会去这里找 source_name 对应的 samples/ 和 categories/）
 --output-dir:   all_labels.json 和 report.html 的统一输出目录
+--mapping:      (可选) 类别名称映射文件路径，默认使用 configs/annotation/mapping.json
 --limit:        (可选) 限制处理的图片数量，方便快速测试
 --sample-ids:   (可选) 指定一个或多个 sample_id，仅生成这些样本
 --sample-ids-file: (可选) 从文本文件读取 sample_id，每行一个，支持与 --sample-ids 同时使用
@@ -49,56 +58,63 @@ from src.annotation.free_bbox.grid_ops import _get_bbox_corners
 from src.utils.coord_utils import project_world, transform_points
 from src.datasets.hope_adapter import HopeAdapter
 from src.datasets.housecat6d_adapter import HouseCat6DAdapter
+from src.datasets.ycb_video_adapter import YCBVideoAdapter
 from src.annotation.free_bbox.datatypes import SceneData, ObjectInfo, CameraParams
 
 # ===================== 全局配置与缓存 =====================
 LABEL_TEMPLATE = "Move {object_name} located at {rel_original} {ref_a_name} to {rel_placement} {ref_b_name}."
-MAPPING_PATH = '/data/wenhao.hai/Spatial-Affordance/tools/api_label/mapping.json'
+MAPPING_PATH = '/data/jiajun.xie/Spatial-Affordance/configs/annotation/mapping.json'
 
 # 上下关系判定阈值：XY 足迹重叠足够大时，才把 Z 方向差异解释为上下关系
 VERTICAL_FOOTPRINT_OVERLAP_RATIO = 0.50
 VERTICAL_TOLERANCE_RATIO = 0.10
 MIN_VERTICAL_TOLERANCE = 1.0
+VERTICAL_MAX_PENETRATION_RATIO = 0.35
+MAX_VERTICAL_PENETRATION = 3.0
+VERTICAL_CENTER_SEPARATION_RATIO = 0.20
+MIN_VERTICAL_CENTER_SEPARATION = 0.5
 HORIZONTAL_CENTER_EPS_PX = 1e-6
 AXIS_DIRECTION_HALF_WIDTH_DEG = 15.0
+DEPTH_DIRECTION_MIN_CM = 5.0
+DEPTH_DIRECTION_EXTENT_RATIO = 0.20
+LATERAL_DIRECTION_MIN_PX = 8.0
 MIN_VISIBILITY_RATIO = 0.4
 MAX_OCCLUSION_RATIO = 0.5
 SMALL_IMAGE_AREA_THRESHOLD = 2500
 LARGE_IMAGE_AREA_THRESHOLD = 5000
 MAX_REFERENCE_CANDIDATES = 3
 
-GLOBAL_MAPPING_CACHE = None
-CATEGORY_JSON_CACHE = {}
-
+GLOBAL_MAPPING_CACHE = {}
 # ===================== 1. 集成的Mapping与名称获取函数 =====================
-def get_mapping():
+def get_mapping(mapping_path: str = None):
     """
-    用法: mapping = get_mapping()
+    用法: mapping = get_mapping(mapping_path)
     作用: 读取并缓存类别名到展示名的映射表。
-    输入: 无，使用全局 MAPPING_PATH。
+    输入: mapping_path 为可选的映射文件路径，默认使用全局 MAPPING_PATH。
     输出: dict，类别名映射表；读取失败时为空 dict。
     """
     global GLOBAL_MAPPING_CACHE
-    if GLOBAL_MAPPING_CACHE is None:
+    path = mapping_path or MAPPING_PATH
+    if path not in GLOBAL_MAPPING_CACHE:
         try:
-            with open(MAPPING_PATH, 'r', encoding="utf-8") as f:
-                GLOBAL_MAPPING_CACHE = json.load(f)
-                if 'mapping' in GLOBAL_MAPPING_CACHE:
-                    GLOBAL_MAPPING_CACHE = GLOBAL_MAPPING_CACHE['mapping']
+            with open(path, 'r', encoding="utf-8") as f:
+                data = json.load(f)
+                if 'mapping' in data:
+                    data = data['mapping']
+            GLOBAL_MAPPING_CACHE[path] = data
         except Exception as e:
             print(f"⚠️ 无法读取 Mapping 文件: {e}")
-            GLOBAL_MAPPING_CACHE = {}
-    return GLOBAL_MAPPING_CACHE
+            GLOBAL_MAPPING_CACHE[path] = {}
+    return GLOBAL_MAPPING_CACHE[path]
 
-def get_target_object_name(sample_record: dict, source_dir: Path) -> Tuple[str, bool]:
+def get_target_object_name(sample_record: dict, source_dir: Path, mapping_data: dict) -> Tuple[str, bool]:
     """
-    用法: name, found = get_target_object_name(sample_record, source_dir)
+    用法: name, found = get_target_object_name(sample_record, source_dir, mapping_data)
     作用: 从 sample record 中获取目标物体展示名。
-    输入: sample_record 为 placement 样本记录；source_dir 保留兼容旧调用。
+    输入: sample_record 为 placement 样本记录；source_dir 保留兼容旧调用；mapping_data 为类别映射表。
     输出: (object_name, is_found_target)。
     """
     del source_dir
-    mapping_data = get_mapping()
     target_class_name = sample_record.get('class_name')
     is_found_target = False
     if target_class_name:
@@ -109,57 +125,20 @@ def get_target_object_name(sample_record: dict, source_dir: Path) -> Tuple[str, 
     return target_object_name, is_found_target
 
 def get_reference_objects_with_names(
-    adapter: Union[HouseCat6DAdapter, HopeAdapter],
     scene_data: SceneData,
-    frame_id: str,
-    source_dir: Path,
+    mapping_data: dict,
 ) -> Tuple[List[ObjectInfo], List[str]]:
     """
-    用法: refs, names = get_reference_objects_with_names(adapter, scene_data, frame_id, source_dir)
-    作用: 根据 categories 文件筛选当前帧可作为参照物的 ObjectInfo。
-    输入: 数据集 adapter、场景数据、frame_id 和 source 输出目录。
+    用法: refs, names = get_reference_objects_with_names(scene_data, mapping_data)
+    作用: 从 scene_data.objects 中获取当前帧所有物体作为参照物。
+    输入: 场景数据 scene_data，objects 已由 adapter 按帧加载；mapping_data 为类别映射表。
     输出: 参照物 ObjectInfo 列表及其展示名列表。
     """
-    del adapter
-    scene_id = scene_data.scene_id
-    mapping_data = get_mapping()
-    
-    try:
-        frame_idx = int(frame_id)
-    except ValueError:
-        frame_idx = 0
-    
-    categories_dir = source_dir / "categories"
-    reference_names = []
-    
-    if categories_dir.exists():
-        cat_files = list(categories_dir.glob(f"*_{scene_id}_categories.json"))
-        if not cat_files:
-            cat_files = list(categories_dir.glob(f"{scene_id}_categories.json"))
-        
-        if cat_files:
-            cat_path = str(cat_files[0])
-            if cat_path not in CATEGORY_JSON_CACHE:
-                with open(cat_path, 'r', encoding="utf-8") as f:
-                    CATEGORY_JSON_CACHE[cat_path] = json.load(f)
-            
-            cat_data = CATEGORY_JSON_CACHE[cat_path]
-            safe_row_idx = min(frame_idx, len(cat_data) - 1)
-            raw_classes = cat_data[safe_row_idx] if cat_data else []
-            
-            mapped_objects = set()
-            for rc in raw_classes:
-                mapped_name = mapping_data.get(rc, rc)
-                mapped_objects.add(mapped_name)
-            reference_names = list(mapped_objects)
-    
-    reference_objects = []
-    if reference_names:
-        for obj in scene_data.objects:
-            obj_mapped_name = mapping_data.get(obj.class_name, obj.class_name)
-            if obj_mapped_name in reference_names:
-                reference_objects.append(obj)
-    
+    reference_objects = list(scene_data.objects)
+    reference_names = [
+        mapping_data.get(obj.class_name, obj.class_name)
+        for obj in reference_objects
+    ]
     return reference_objects, reference_names
 
 
@@ -367,11 +346,15 @@ def describe_vertical_relation(
     overlap_threshold: float = VERTICAL_FOOTPRINT_OVERLAP_RATIO,
     tolerance_ratio: float = VERTICAL_TOLERANCE_RATIO,
     min_tolerance: float = MIN_VERTICAL_TOLERANCE,
+    max_penetration_ratio: float = VERTICAL_MAX_PENETRATION_RATIO,
+    max_penetration: float = MAX_VERTICAL_PENETRATION,
+    center_separation_ratio: float = VERTICAL_CENTER_SEPARATION_RATIO,
+    min_center_separation: float = MIN_VERTICAL_CENTER_SEPARATION,
 ) -> Optional[str]:
     """
     用法: relation = describe_vertical_relation(target_corners_world, ref_corners_world)
-    作用: 基于真实 world box 自适应判断目标物是否在参照物上方或下方。
-    输入: target/ref 的 (N,3) 世界坐标角点，以及足迹重叠和 Z 方向容差阈值。
+    作用: 基于真实 world box 判断上下关系，并允许有限 bbox 穿插。
+    输入: target/ref 的 (N,3) 世界坐标角点、足迹重叠阈值、穿插容差和中心高度分离阈值。
     输出: "the top of"、"below" 或 None；None 表示不属于上下关系。
     """
     if footprint_overlap_ratio(target_corners_world, ref_corners_world) < overlap_threshold:
@@ -381,15 +364,37 @@ def describe_vertical_relation(
     r_min, r_max = get_world_aabb(ref_corners_world)
     target_height = max(float(t_max[2] - t_min[2]), 0.0)
     ref_height = max(float(r_max[2] - r_min[2]), 0.0)
-    vertical_tolerance = max(float(min_tolerance), float(tolerance_ratio) * min(target_height, ref_height))
+    min_height = min(target_height, ref_height)
+    contact_tolerance = max(float(min_tolerance), float(tolerance_ratio) * min_height)
+    penetration_limit = max(
+        contact_tolerance,
+        min(float(max_penetration), float(max_penetration_ratio) * min_height),
+    )
+    center_separation = max(
+        float(min_center_separation),
+        float(center_separation_ratio) * min_height,
+    )
 
     target_center_z = float((t_min[2] + t_max[2]) * 0.5)
     ref_center_z = float((r_min[2] + r_max[2]) * 0.5)
-    if target_center_z > ref_center_z and t_min[2] >= r_max[2] - vertical_tolerance:
+    top_penetration = max(0.0, float(r_max[2] - t_min[2]))
+    below_penetration = max(0.0, float(t_max[2] - r_min[2]))
+    if target_center_z > ref_center_z + center_separation and top_penetration <= penetration_limit:
         return "the top of"
-    if target_center_z < ref_center_z and t_max[2] <= r_min[2] + vertical_tolerance:
+    if target_center_z < ref_center_z - center_separation and below_penetration <= penetration_limit:
         return "below"
     return None
+
+def project_box_center_to_camera(corners_world: np.ndarray, E_w2c: np.ndarray) -> np.ndarray:
+    """
+    用法: center_cam = project_box_center_to_camera(corners_world, E_w2c)
+    作用: 将真实 world box 的中心点变换到相机坐标系。
+    输入: corners_world 为 (N,3) 世界坐标角点；E_w2c 为 (4,4) world->camera 矩阵。
+    输出: np.ndarray，形状为 (3,) 的相机坐标中心 [x, y, z]。
+    """
+    center_world = np.asarray(corners_world, dtype=np.float64).mean(axis=0, dtype=np.float64)
+    center_homo = np.append(center_world, 1.0)
+    return (np.asarray(E_w2c, dtype=np.float64) @ center_homo)[:3]
 
 def project_box_center_to_pixel(corners_world: np.ndarray, E_w2c: np.ndarray, K: np.ndarray) -> np.ndarray:
     """
@@ -473,6 +478,77 @@ def describe_horizontal_relation_by_pixel_angle(
     angle_deg = float(np.degrees(np.arctan2(delta_uv[1], delta_uv[0])))
     return describe_angle_relation(angle_deg, axis_half_width_deg=axis_half_width_deg)
 
+def compute_depth_direction_threshold(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+    E_w2c: np.ndarray,
+    min_depth_cm: float = DEPTH_DIRECTION_MIN_CM,
+    extent_ratio: float = DEPTH_DIRECTION_EXTENT_RATIO,
+) -> float:
+    """
+    用法: threshold = compute_depth_direction_threshold(target_corners_world, ref_corners_world, E_w2c)
+    作用: 根据最小深度阈值和两个 box 的相机深度厚度生成前后方向阈值。
+    输入: target/ref 世界角点、world->camera 外参、最小深度阈值和深度厚度比例。
+    输出: float，判定 front/back 所需的相机深度差阈值。
+    """
+    t_min_c, t_max_c = get_camera_aabb(target_corners_world, E_w2c)
+    r_min_c, r_max_c = get_camera_aabb(ref_corners_world, E_w2c)
+    target_depth_extent = max(0.0, float(t_max_c[2] - t_min_c[2]))
+    ref_depth_extent = max(0.0, float(r_max_c[2] - r_min_c[2]))
+    adaptive_threshold = float(extent_ratio) * min(target_depth_extent, ref_depth_extent)
+    return max(float(min_depth_cm), adaptive_threshold)
+
+def describe_horizontal_relation_by_depth(
+    target_corners_world: np.ndarray,
+    ref_corners_world: np.ndarray,
+    E_w2c: np.ndarray,
+    K: np.ndarray,
+    lateral_min_px: float = LATERAL_DIRECTION_MIN_PX,
+    depth_min_cm: float = DEPTH_DIRECTION_MIN_CM,
+) -> str:
+    """
+    用法: relation = describe_horizontal_relation_by_depth(target_corners_world, ref_corners_world, E_w2c, K)
+    作用: 用像素横向偏移判断左右，用相机深度差判断前后，并组合成 8 向关系。
+    输入: target/ref 的世界角点、world->camera 外参、相机内参、横向像素阈值和深度阈值。
+    输出: str，深度感知的水平方向关系；中心近似重合时返回 "near"。
+    """
+    target_uv = project_box_center_to_pixel(target_corners_world, E_w2c, K)
+    ref_uv = project_box_center_to_pixel(ref_corners_world, E_w2c, K)
+    target_cam = project_box_center_to_camera(target_corners_world, E_w2c)
+    ref_cam = project_box_center_to_camera(ref_corners_world, E_w2c)
+
+    delta_u = float(target_uv[0] - ref_uv[0])
+    delta_depth = float(target_cam[2] - ref_cam[2])
+    depth_threshold = compute_depth_direction_threshold(
+        target_corners_world,
+        ref_corners_world,
+        E_w2c,
+        min_depth_cm=depth_min_cm,
+    )
+
+    is_right = delta_u > float(lateral_min_px)
+    is_left = delta_u < -float(lateral_min_px)
+    is_back = delta_depth > depth_threshold
+    is_front = delta_depth < -depth_threshold
+
+    if is_back:
+        if is_right:
+            return "the back right of"
+        if is_left:
+            return "the back left of"
+        return "behind"
+    if is_front:
+        if is_right:
+            return "the front right of"
+        if is_left:
+            return "the front left of"
+        return "in front of"
+    if is_right:
+        return "the right of"
+    if is_left:
+        return "the left of"
+    return "near"
+
 def describe_spatial_relation(
     target_corners_world: np.ndarray,
     ref_corners_world: np.ndarray,
@@ -481,14 +557,14 @@ def describe_spatial_relation(
 ) -> str:
     """
     用法: relation = describe_spatial_relation(target_corners_world, ref_corners_world, E_w2c, K)
-    作用: 先用真实 world box 判断上下关系；不是上下时再用像素中心角度判断水平关系。
+    作用: 先用真实 world box 判断上下关系；不是上下时融合像素左右和相机深度判断水平关系。
     输入: target/ref 的世界角点、world->camera 外参和相机内参。
     输出: str，10 类方向关系之一，极端中心重合时为 "near"。
     """
     vertical_relation = describe_vertical_relation(target_corners_world, ref_corners_world)
     if vertical_relation is not None:
         return vertical_relation
-    return describe_horizontal_relation_by_pixel_angle(target_corners_world, ref_corners_world, E_w2c, K)
+    return describe_horizontal_relation_by_depth(target_corners_world, ref_corners_world, E_w2c, K)
 
 def get_object_corners_world(obj: ObjectInfo) -> np.ndarray:
     """
@@ -692,18 +768,18 @@ def find_nearest_reference(
 
         center_dist = center_distance(t_min_c, t_max_c, r_min_c, r_max_c)
         score = 1.0 / (center_dist + 1e-5)
-        valid_candidates.append((score, center_dist, ref))
+        relation = describe_spatial_relation(target_corners_world, ref_corners_world, E_w2c, K)
+        vertical_priority = 1 if relation in ("the top of", "below") else 0
+        valid_candidates.append((vertical_priority, score, center_dist, ref, relation))
 
     if not valid_candidates:
         return [(None, "near", float('inf'))]
 
-    valid_candidates.sort(key=lambda x: x[0], reverse=True)
+    valid_candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     top_candidates = valid_candidates[:MAX_REFERENCE_CANDIDATES]
 
     all_candidates = []
-    for _, dist, ref in top_candidates:
-        ref_corners_world = obj_info_map[ref.obj_id]["corners_world"]
-        relation = describe_spatial_relation(target_corners_world, ref_corners_world, E_w2c, K)
+    for _, _, dist, ref, relation in top_candidates:
         all_candidates.append((ref, relation, dist))
 
     return all_candidates or [(None, "near", float('inf'))]
@@ -712,19 +788,21 @@ def calculate_spatial_relation(
     target_corners_world: np.ndarray,
     reference_objects: List[ObjectInfo],
     camera: CameraParams,
-    exclude_id: str = None,  
+    exclude_id: str = None,
+    mapping_data: dict = None,
 ) -> List[Tuple[str, str]]:
     """
-    用法: relations = calculate_spatial_relation(target_corners_world, reference_objects, camera, exclude_id)
+    用法: relations = calculate_spatial_relation(target_corners_world, reference_objects, camera, exclude_id, mapping_data)
     作用: 将目标 box 与候选参照物转换为自然语言空间关系和参照物名称。
-    输入: 目标 world box 角点、参照物列表、相机参数和可选排除 obj_id。
+    输入: 目标 world box 角点、参照物列表、相机参数、可选排除 obj_id 和类别映射表。
     输出: list[(relation, ref_name)]，用于填充自动标注模板。
     """
     all_candidates = find_nearest_reference(
         target_corners_world, reference_objects, camera, exclude_id
     )
-    
-    mapping_data = get_mapping()
+
+    if mapping_data is None:
+        mapping_data = {}
     result = []
     for ref, relation, _ in all_candidates:
         if ref is None:
@@ -732,7 +810,7 @@ def calculate_spatial_relation(
         else:
             ref_name = mapping_data.get(ref.class_name, ref.class_name)
             result.append((relation, ref_name))
-    
+
     return result
 
 # ===================== 3. 标注生成函数 =====================
@@ -741,35 +819,36 @@ def generate_label(
     scene_data: SceneData,
     reference_objects: List[ObjectInfo],
     target_object_name: str,
+    mapping_data: dict,
 ) -> str:
     """
-    用法: label = generate_label(sample_record, scene_data, reference_objects, target_object_name)
+    用法: label = generate_label(sample_record, scene_data, reference_objects, target_object_name, mapping_data)
     作用: 生成单个 placement sample 的自然语言移动指令。
-    输入: sample 记录、场景数据、参照物列表和目标物体展示名。
+    输入: sample 记录、场景数据、参照物列表、目标物体展示名和类别映射表。
     输出: str，完整自然语言标注。
     """
     canonical_aabb = np.asarray(sample_record["canonical_aabb_object"], dtype=np.float64)
     canonical_corners = _get_bbox_corners(canonical_aabb)
-    
+
     original_pose = np.asarray(sample_record["original_pose_world"], dtype=np.float64)
     original_corners = transform_points(canonical_corners, original_pose)
-    
+
     placement_pose = np.asarray(sample_record["transform_world"], dtype=np.float64)
     placement_corners = transform_points(canonical_corners, placement_pose)
-    
+
     target_obj_id = sample_record.get('object_id')
     if not target_obj_id:
         target_obj_id = sample_record.get('sample_id').split('_')[2]
-        
-    # 1. 先正常计算原始位置的描述（修复：取候选列表第一个元素，增加空值保护）
+
+    # 1. 先正常计算原始位置的描述
     original_relations = calculate_spatial_relation(
-        original_corners, reference_objects, scene_data.camera, exclude_id=target_obj_id
+        original_corners, reference_objects, scene_data.camera, exclude_id=target_obj_id, mapping_data=mapping_data
     )
     rel_original, ref_a_name = original_relations[0] if original_relations else ("near", "the reference object")
 
-    # 2. 计算目标位置的描述（修复：取候选列表第一个元素，增加空值保护）
+    # 2. 计算目标位置的描述
     placement_relations = calculate_spatial_relation(
-        placement_corners, reference_objects, scene_data.camera, exclude_id=None
+        placement_corners, reference_objects, scene_data.camera, exclude_id=None, mapping_data=mapping_data
     )
     rel_placement, ref_b_name = placement_relations[0] if placement_relations else ("near", "the reference object")
 
@@ -777,22 +856,21 @@ def generate_label(
     if (ref_b_name == ref_a_name) and (rel_placement == rel_original):
         # 找到 ref_a 对应的 object_id
         ref_a_id = None
-        mapping_data = get_mapping()
         for obj in reference_objects:
             if mapping_data.get(obj.class_name, obj.class_name) == ref_a_name:
                 ref_a_id = obj.obj_id
                 break
-        
+
         # 把 ref_a 从候选列表里拿掉，重新选一个
         if ref_a_id is not None:
             filtered_refs = [obj for obj in reference_objects if obj.obj_id != ref_a_id]
             if filtered_refs:
                 new_placement_relations = calculate_spatial_relation(
-                    placement_corners, filtered_refs, scene_data.camera, exclude_id=target_obj_id
+                    placement_corners, filtered_refs, scene_data.camera, exclude_id=target_obj_id, mapping_data=mapping_data
                 )
                 # 再次保护：确保新列表有值
                 rel_placement, ref_b_name = new_placement_relations[0] if new_placement_relations else (rel_placement, ref_b_name)
-    
+
     return LABEL_TEMPLATE.format(
         object_name=target_object_name,
         rel_original=rel_original,
@@ -814,6 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-dir", required=True, type=Path, help="可视化的图片目录 (例如 outputs/placement_rgb_bbox_vis)")
     parser.add_argument("--outputs-base", type=Path, default=PROJECT_ROOT / "outputs", help="数据集的输出基准目录")
     parser.add_argument("--output-dir", required=True, type=Path, help="标注 JSON 和 HTML 报告输出目录")
+    parser.add_argument("--mapping", type=Path, default=MAPPING_PATH, help="类别名称映射文件路径 (JSON)")
     parser.add_argument("--limit", type=int, default=None, help="仅标注前 N 个样本")
     parser.add_argument("--sample-ids", nargs="+", default=None, help="仅标注指定 sample_id，可一次传入多个")
     parser.add_argument("--sample-ids-file", type=Path, default=None, help="从文本文件读取 sample_id，每行一个")
@@ -864,6 +943,8 @@ def infer_config_path(source_name: str) -> Path:
     """
     if "housecat" in source_name.lower():
         return PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml"
+    if "ycbv" in source_name.lower() or "ycb_video" in source_name.lower():
+        return PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 def load_scene_cached(scene_cache: Dict, adapter, source_dir: Path, scene_id: str, frame_id: str):
@@ -966,6 +1047,13 @@ def build_adapter_from_config(ds_cfg: dict):
             root_dir=ds_cfg["root_dir"],
             frame_step=ds_cfg.get("frame_step", 60),
         )
+    if ds_type == "ycb_video":
+        return YCBVideoAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            frame_step=ds_cfg.get("frame_step", 5),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
     raise ValueError(f"不支持的数据集类型: {ds_type}")
 
 def load_sample_lookup(samples_dir: Path) -> Dict[str, dict]:
@@ -1015,11 +1103,12 @@ def build_label_record(
     source_dir: Path,
     adapter,
     scene_cache: Dict,
+    mapping_data: dict,
 ) -> dict:
     """
-    用法: record = build_label_record(img_file, source_name, sample_id, sample_record, source_dir, adapter, scene_cache)
+    用法: record = build_label_record(img_file, source_name, sample_id, sample_record, source_dir, adapter, scene_cache, mapping_data)
     作用: 为单张图片和 sample record 生成 all_labels.json 中的一条记录。
-    输入: 图片路径、source/sample 信息、数据源目录、adapter 和场景缓存。
+    输入: 图片路径、source/sample 信息、数据源目录、adapter、场景缓存和类别映射表。
     输出: dict，包含图片名、sample_id、目标名称和生成 label。
     """
     scene = load_scene_cached(
@@ -1029,11 +1118,9 @@ def build_label_record(
         str(sample_record["scene_id"]),
         str(sample_record["frame_id"]),
     )
-    target_object_name, is_found_target = get_target_object_name(sample_record, source_dir)
-    reference_objects, _ = get_reference_objects_with_names(
-        adapter, scene, str(sample_record["frame_id"]), source_dir
-    )
-    label = generate_label(sample_record, scene, reference_objects, target_object_name)
+    target_object_name, is_found_target = get_target_object_name(sample_record, source_dir, mapping_data)
+    reference_objects, _ = get_reference_objects_with_names(scene, mapping_data)
+    label = generate_label(sample_record, scene, reference_objects, target_object_name, mapping_data)
     return {
         "image_filename": img_file.name,
         "sample_id": sample_id,
@@ -1132,15 +1219,18 @@ def auto_label_from_images(
     limit: int = None,
     overwrite: bool = False,
     sample_id_filter: Optional[Set[str]] = None,
+    mapping_path: str = None,
 ) -> int:
     """
-    用法: count = auto_label_from_images(image_dir, outputs_base, output_dir, sample_id_filter={"sample_a"})
+    用法: count = auto_label_from_images(image_dir, outputs_base, output_dir, sample_id_filter={"sample_a"}, mapping_path="mapping.json")
     作用: 以可视化图片为索引生成自动标注，可选只处理指定 sample_id。
-    输入: 图片目录、placement 输出根目录、标注输出目录、limit、overwrite 和 sample_id 过滤集合。
+    输入: 图片目录、placement 输出根目录、标注输出目录、limit、overwrite、sample_id 过滤集合和类别映射文件路径。
     输出: int，实际成功标注的样本数量。
     """
     del overwrite
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    mapping_data = get_mapping(mapping_path)
 
     image_files = collect_image_files(image_dir)
     if not image_files:
@@ -1184,6 +1274,7 @@ def auto_label_from_images(
                 source_dir=outputs_base / source_name,
                 adapter=adapters[source_name],
                 scene_cache=scene_cache,
+                mapping_data=mapping_data,
             )
         )
 
@@ -1218,8 +1309,9 @@ def main() -> None:
     image_dir = args.image_dir.resolve()
     outputs_base = args.outputs_base.resolve()
     output_dir = args.output_dir.resolve()
+    mapping_path = str(args.mapping.resolve()) if args.mapping else None
     sample_id_filter = build_sample_id_filter(args.sample_ids, args.sample_ids_file)
-    
+
     auto_label_from_images(
         image_dir=image_dir,
         outputs_base=outputs_base,
@@ -1227,6 +1319,7 @@ def main() -> None:
         limit=args.limit,
         overwrite=args.overwrite,
         sample_id_filter=sample_id_filter,
+        mapping_path=mapping_path,
     )
     
     print(f"图片来源目录: {image_dir}")
