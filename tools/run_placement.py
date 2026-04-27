@@ -133,6 +133,15 @@ def build_adapter(cfg):
             frame_step=ds_cfg.get("frame_step", 5),
             min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
         )
+    if ds_type == "scannet":
+        from src.datasets.scannet_adapter import ScanNetAdapter
+        return ScanNetAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 100),
+            instance_dir_name=ds_cfg.get("instance_dir_name", "2d-instance"),
+            min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
+            excluded_labels=ds_cfg.get("excluded_labels"),
+        )
     else:
         raise ValueError(f"Unknown dataset type: {ds_type}")
 
@@ -161,6 +170,8 @@ def build_placement_config(cfg):
         world_up=tuple(world_up),
         vis_margin_px=vis.get("vis_margin_px", 30),
         stability_chunk_size=comp.get("stability_chunk_size", 2000),
+        preserve_orientation=plc.get("preserve_orientation", True),
+        orientation_threshold_deg=plc.get("orientation_threshold_deg", 15.0),
     )
 
 

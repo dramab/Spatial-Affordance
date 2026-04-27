@@ -147,6 +147,16 @@ def build_adapter(cfg: dict):
             min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
         )
 
+    if ds_type == "scannet":
+        from src.datasets.scannet_adapter import ScanNetAdapter
+        return ScanNetAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 100),
+            instance_dir_name=ds_cfg.get("instance_dir_name", "2d-instance"),
+            min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
+            excluded_labels=ds_cfg.get("excluded_labels"),
+        )
+
     raise ValueError(f"Unsupported dataset type: {ds_type}")
 
 
@@ -162,6 +172,8 @@ def infer_config_path(input_dir: Path) -> Path:
         return PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml"
     if "ycbv" in name or "ycb_video" in name:
         return PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml"
+    if "scannet" in name:
+        return PROJECT_ROOT / "configs/annotation/placement_scannet.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 

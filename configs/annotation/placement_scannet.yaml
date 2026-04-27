@@ -1,0 +1,46 @@
+# ScanNet extracted_scans 放置规划参数配置
+# Adapter 会将深度、相机位姿和实例 mesh 尺寸统一转换为 cm
+
+# 数据集适配器
+dataset:
+  type: "scannet"
+  root_dir: "/data/jiajun.xie/ScanNet/data/extracted_scans"
+  frame_step: 100
+  instance_dir_name: "2d-instance"
+  min_visible_pixels: 1
+
+# 占据栅格
+occupancy:
+  voxel_size: 5.0
+  pixel_stride: 8
+  grid_padding: 10.0
+
+# 放置规划
+placement:
+  safety_margin: 5.0
+  yaw_steps: 12
+  min_surface_area: 2500.0
+  min_support_ratio: 0.8
+  occlusion_threshold: 0.5
+  world_up: [0.0, 0.0, 1.0]
+  preserve_orientation: true
+  orientation_threshold_deg: 5
+
+# 聚类
+clustering:
+  dbscan_eps: null
+  dbscan_min_samples: 1
+
+# 可视化
+visualization:
+  vis_margin_px: 30
+  save_vis: true
+
+# 计算
+compute:
+  use_gpu: false
+  stability_chunk_size: 2000
+
+# 输出
+output:
+  dir: "outputs/scannet"

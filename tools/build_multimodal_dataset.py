@@ -69,6 +69,7 @@ DEFAULT_CONFIGS = {
     "hope": PROJECT_ROOT / "configs/annotation/placement.yaml",
     "housecat6d": PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml",
     "ycbv_test": PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml",
+    "scannet": PROJECT_ROOT / "configs/annotation/placement_scannet.yaml",
 }
 
 
@@ -174,6 +175,17 @@ def build_adapter(cfg: dict):
             min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
         )
 
+    if ds_type == "scannet":
+        from src.datasets.scannet_adapter import ScanNetAdapter
+
+        return ScanNetAdapter(
+            root_dir=ds_cfg["root_dir"],
+            frame_step=ds_cfg.get("frame_step", 100),
+            instance_dir_name=ds_cfg.get("instance_dir_name", "2d-instance"),
+            min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
+            excluded_labels=ds_cfg.get("excluded_labels"),
+        )
+
     raise ValueError(f"Unsupported dataset type: {ds_type}")
 
 
@@ -187,6 +199,8 @@ def build_source_configs(source_names: Iterable[str]) -> Dict[str, dict]:
     configs: Dict[str, dict] = {}
     for source_name in sorted(set(source_names)):
         config_path = DEFAULT_CONFIGS.get(source_name)
+        if config_path is None and "scannet" in source_name.lower():
+            config_path = DEFAULT_CONFIGS["scannet"]
         if config_path is None:
             raise KeyError(f"No dataset config mapping for source: {source_name}")
         configs[source_name] = load_yaml_config(config_path)
@@ -454,6 +468,24 @@ def load_camera_for_frame(source_name: str, source_cfg: Mapping[str, object], sc
         ) * 0.1
         e_c2w = np.linalg.inv(e_w2c)
         img_w, img_h = Image.open(rgb_path).size
+        return make_camera_serializable(
+            fx=intrinsics[0, 0],
+            fy=intrinsics[1, 1],
+            cx=intrinsics[0, 2],
+            cy=intrinsics[1, 2],
+            img_w=img_w,
+            img_h=img_h,
+            e_c2w=e_c2w,
+        )
+
+    if "scannet" in source_name.lower():
+        intrinsic_path = scene_path / "intrinsic" / "intrinsic_depth.txt"
+        pose_path = scene_path / "pose" / f"{frame_id}.txt"
+        depth_path = scene_path / "depth" / f"{frame_id}.png"
+        intrinsics = np.loadtxt(intrinsic_path, dtype=np.float64).reshape(4, 4)[:3, :3]
+        e_c2w = np.loadtxt(pose_path, dtype=np.float64).reshape(4, 4)
+        e_c2w[:3, 3] *= 100.0
+        img_w, img_h = Image.open(depth_path).size
         return make_camera_serializable(
             fx=intrinsics[0, 0],
             fy=intrinsics[1, 1],
