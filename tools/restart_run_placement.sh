@@ -4,7 +4,7 @@ set -u
 
 CMD=(
 python tools/run_placement.py \
-        --config configs/annotation/placement_scannet.yaml \
+        --config configs/annotation/placement_dopose.yaml \
         --batch --workers 4 \
         )
 

@@ -142,6 +142,16 @@ def build_adapter(cfg):
             min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
             excluded_labels=ds_cfg.get("excluded_labels"),
         )
+    if ds_type == "dopose":
+        from src.datasets.dopose_adapter import DoPoseAdapter
+        return DoPoseAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            models_names_path=ds_cfg.get("models_names_path"),
+            subsets=ds_cfg.get("subsets"),
+            frame_step=ds_cfg.get("frame_step", 1),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
     else:
         raise ValueError(f"Unknown dataset type: {ds_type}")
 

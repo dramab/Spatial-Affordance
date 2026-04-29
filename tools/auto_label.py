@@ -60,6 +60,7 @@ from src.datasets.hope_adapter import HopeAdapter
 from src.datasets.housecat6d_adapter import HouseCat6DAdapter
 from src.datasets.ycb_video_adapter import YCBVideoAdapter
 from src.datasets.scannet_adapter import ScanNetAdapter
+from src.datasets.dopose_adapter import DoPoseAdapter
 from src.annotation.free_bbox.datatypes import SceneData, ObjectInfo, CameraParams
 
 # ===================== 全局配置与缓存 =====================
@@ -948,6 +949,8 @@ def infer_config_path(source_name: str) -> Path:
         return PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml"
     if "scannet" in source_name.lower():
         return PROJECT_ROOT / "configs/annotation/placement_scannet.yaml"
+    if "dopose" in source_name.lower():
+        return PROJECT_ROOT / "configs/annotation/placement_dopose.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 def load_scene_cached(scene_cache: Dict, adapter, source_dir: Path, scene_id: str, frame_id: str):
@@ -1064,6 +1067,15 @@ def build_adapter_from_config(ds_cfg: dict):
             instance_dir_name=ds_cfg.get("instance_dir_name", "2d-instance"),
             min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
             excluded_labels=ds_cfg.get("excluded_labels"),
+        )
+    if ds_type == "dopose":
+        return DoPoseAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            models_names_path=ds_cfg.get("models_names_path"),
+            subsets=ds_cfg.get("subsets"),
+            frame_step=ds_cfg.get("frame_step", 1),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
         )
     raise ValueError(f"不支持的数据集类型: {ds_type}")
 

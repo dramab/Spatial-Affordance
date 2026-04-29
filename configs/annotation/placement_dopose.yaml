@@ -1,0 +1,41 @@
+# DoPose 放置规划参数配置
+# Adapter 会将 BOP 原始深度、位姿、相机外参和模型尺寸统一转换为 cm
+
+dataset:
+  type: "dopose"
+  root_dir: "/data/jiajun.xie/Spatial-Affordance/data/dopose"
+  models_info_path: "/data/jiajun.xie/Spatial-Affordance/data/dopose/models/models_info.json"
+  models_names_path: "/data/jiajun.xie/Spatial-Affordance/data/dopose/models_names.json"
+  subsets: ["test_bin", "test_table"]
+  frame_step: 1
+  min_visib_fract: 0.0
+
+occupancy:
+  voxel_size: 1.0
+  pixel_stride: 2
+  grid_padding: 10.0
+
+placement:
+  safety_margin: 2
+  yaw_steps: 24
+  min_surface_area: 50.0
+  min_support_ratio: 1.0
+  occlusion_threshold: 0.3
+  world_up: [0.0, 0.0, 1.0]
+  preserve_orientation: true
+  orientation_threshold_deg: 5
+
+clustering:
+  dbscan_eps: null
+  dbscan_min_samples: 1
+
+visualization:
+  vis_margin_px: 30
+  save_vis: true
+
+compute:
+  use_gpu: false
+  stability_chunk_size: 2000
+
+output:
+  dir: "outputs/dopose"

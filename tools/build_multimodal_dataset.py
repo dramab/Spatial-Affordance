@@ -70,6 +70,7 @@ DEFAULT_CONFIGS = {
     "housecat6d": PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml",
     "ycbv_test": PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml",
     "scannet": PROJECT_ROOT / "configs/annotation/placement_scannet.yaml",
+    "dopose": PROJECT_ROOT / "configs/annotation/placement_dopose.yaml",
 }
 
 
@@ -186,6 +187,18 @@ def build_adapter(cfg: dict):
             excluded_labels=ds_cfg.get("excluded_labels"),
         )
 
+    if ds_type == "dopose":
+        from src.datasets.dopose_adapter import DoPoseAdapter
+
+        return DoPoseAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            models_names_path=ds_cfg.get("models_names_path"),
+            subsets=ds_cfg.get("subsets"),
+            frame_step=ds_cfg.get("frame_step", 1),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
+
     raise ValueError(f"Unsupported dataset type: {ds_type}")
 
 
@@ -201,6 +214,8 @@ def build_source_configs(source_names: Iterable[str]) -> Dict[str, dict]:
         config_path = DEFAULT_CONFIGS.get(source_name)
         if config_path is None and "scannet" in source_name.lower():
             config_path = DEFAULT_CONFIGS["scannet"]
+        if config_path is None and "dopose" in source_name.lower():
+            config_path = DEFAULT_CONFIGS["dopose"]
         if config_path is None:
             raise KeyError(f"No dataset config mapping for source: {source_name}")
         configs[source_name] = load_yaml_config(config_path)
@@ -494,6 +509,28 @@ def load_camera_for_frame(source_name: str, source_cfg: Mapping[str, object], sc
             img_w=img_w,
             img_h=img_h,
             e_c2w=e_c2w,
+        )
+
+    if "dopose" in source_name.lower():
+        from src.datasets.dopose_adapter import DoPoseAdapter
+
+        adapter = DoPoseAdapter(
+            root_dir=dataset_cfg["root_dir"],
+            models_info_path=dataset_cfg["models_info_path"],
+            models_names_path=dataset_cfg.get("models_names_path"),
+            subsets=dataset_cfg.get("subsets"),
+            frame_step=dataset_cfg.get("frame_step", 1),
+            min_visib_fract=dataset_cfg.get("min_visib_fract", 0.0),
+        )
+        scene = adapter.load_scene(str(scene_path), frame_id)
+        return make_camera_serializable(
+            fx=scene.camera.fx,
+            fy=scene.camera.fy,
+            cx=scene.camera.cx,
+            cy=scene.camera.cy,
+            img_w=scene.camera.img_w,
+            img_h=scene.camera.img_h,
+            e_c2w=scene.camera.E_c2w,
         )
 
     raise ValueError(f"Unsupported source_name: {source_name}")

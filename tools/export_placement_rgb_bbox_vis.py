@@ -157,6 +157,26 @@ def build_adapter(cfg: dict):
             excluded_labels=ds_cfg.get("excluded_labels"),
         )
 
+    if ds_type == "dopose":
+        from src.datasets.dopose_adapter import DoPoseAdapter
+        return DoPoseAdapter(
+            root_dir=ds_cfg["root_dir"],
+            models_info_path=ds_cfg["models_info_path"],
+            models_names_path=ds_cfg.get("models_names_path"),
+            subsets=ds_cfg.get("subsets"),
+            frame_step=ds_cfg.get("frame_step", 1),
+            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
+        )
+
+    if ds_type == "graspnet":
+        from src.datasets.graspnet_adapter import GraspNetAdapter
+        return GraspNetAdapter(
+            root_dir=ds_cfg["root_dir"],
+            sensor=ds_cfg.get("sensor", "kinect"),
+            frame_step=ds_cfg.get("frame_step", 1),
+            min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
+        )
+
     raise ValueError(f"Unsupported dataset type: {ds_type}")
 
 
@@ -174,6 +194,10 @@ def infer_config_path(input_dir: Path) -> Path:
         return PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml"
     if "scannet" in name:
         return PROJECT_ROOT / "configs/annotation/placement_scannet.yaml"
+    if "dopose" in name:
+        return PROJECT_ROOT / "configs/annotation/placement_dopose.yaml"
+    if "graspnet" in name:
+        return PROJECT_ROOT / "configs/annotation/placement_graspnet_kinect.yaml"
     return PROJECT_ROOT / "configs/annotation/placement.yaml"
 
 
@@ -205,6 +229,71 @@ def iter_sample_records(sample_files: Iterable[Path]) -> Iterator[Tuple[Path, di
             payload = json.load(f)
         for record in payload.get("samples", []):
             yield sample_file, record
+
+
+def collect_ordered_sample_entries(sample_files: Iterable[Path], output_dir: Path) -> List[dict]:
+    """
+    用法: entries = collect_ordered_sample_entries(sample_files, output_dir)
+    作用: 按脚本原始遍历顺序收集所有样本及其目标输出路径
+    输入: sample_files: Iterable[Path]，样本 JSON 文件路径列表；
+         output_dir: Path，统一输出目录
+    输出: List[dict]，每项包含 sample_file、sample_record、source_dir 与 output_path
+    """
+    sample_entries: List[dict] = []
+    for sample_file, sample_record in iter_sample_records(sample_files):
+        source_dir = sample_file.parents[1].resolve()
+        sample_entries.append(
+            {
+                "sample_file": sample_file,
+                "sample_record": sample_record,
+                "source_dir": source_dir,
+                "output_path": build_output_path(
+                    output_dir=output_dir,
+                    source_dir=source_dir,
+                    sample_id=sample_record["sample_id"],
+                ),
+            }
+        )
+    return sample_entries
+
+
+def find_resume_start_index(sample_entries: List[dict], overwrite: bool = False) -> int:
+    """
+    用法: start_idx = find_resume_start_index(sample_entries, overwrite=False)
+    作用: 找到断点续跑时应该开始导出的样本下标
+    输入: sample_entries: List[dict]，按固定顺序排列的样本列表；
+         overwrite: bool，是否强制全量覆盖
+    输出: int，应开始处理的样本下标
+    """
+    if overwrite:
+        return 0
+
+    last_existing_index = -1
+    for idx, entry in enumerate(sample_entries):
+        if entry["output_path"].exists():
+            last_existing_index = idx
+    return last_existing_index + 1
+
+
+def prepare_export_sample_entries(sample_files: Iterable[Path],
+                                  output_dir: Path,
+                                  limit: int = None,
+                                  overwrite: bool = False) -> Tuple[List[dict], int]:
+    """
+    用法: pending_entries, start_idx = prepare_export_sample_entries(...)
+    作用: 按最后一张已存在图片的位置裁剪待导出的样本列表
+    输入: sample_files: Iterable[Path]，样本 JSON 文件路径列表；
+         output_dir: Path，统一输出目录；
+         limit: int | None，最多导出多少条样本；
+         overwrite: bool，是否强制全量覆盖
+    输出: Tuple[List[dict], int]，分别为待导出样本列表与起始下标
+    """
+    sample_entries = collect_ordered_sample_entries(sample_files, output_dir)
+    start_index = find_resume_start_index(sample_entries, overwrite=overwrite)
+    pending_entries = sample_entries[start_index:]
+    if limit is not None:
+        pending_entries = pending_entries[:limit]
+    return pending_entries, start_index
 
 
 def get_scene_path(adapter, scene_id: str) -> Path:
@@ -342,6 +431,12 @@ def export_samples(input_dirs: List[Path],
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     sample_files = collect_sample_jsons(input_dirs)
+    sample_entries, resume_start_index = prepare_export_sample_entries(
+        sample_files=sample_files,
+        output_dir=output_dir,
+        limit=limit,
+        overwrite=overwrite,
+    )
 
     adapters = {}
     for input_dir in input_dirs:
@@ -351,12 +446,13 @@ def export_samples(input_dirs: List[Path],
     scene_cache: Dict[Tuple[str, str, str], object] = {}
     exported = 0
 
-    for sample_file, sample_record in iter_sample_records(sample_files):
-        source_dir = sample_file.parents[1]
-        output_path = build_output_path(output_dir, source_dir, sample_record["sample_id"])
-        if output_path.exists() and not overwrite:
-            continue
+    if resume_start_index > 0 and not overwrite:
+        print(f"检测到已有输出，已从第 {resume_start_index + 1} 条样本继续导出")
 
+    for entry in sample_entries:
+        sample_record = entry["sample_record"]
+        source_dir = entry["source_dir"]
+        output_path = entry["output_path"]
         adapter = adapters[source_dir.resolve()]
         scene = load_scene_cached(
             scene_cache=scene_cache,
@@ -371,8 +467,6 @@ def export_samples(input_dirs: List[Path],
         exported += 1
         if exported % 50 == 0:
             print(f"已导出 {exported} 张图片，最新输出: {output_path}")
-        if limit is not None and exported >= limit:
-            break
 
     return exported
 
