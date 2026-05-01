@@ -507,11 +507,12 @@ def describe_horizontal_relation_by_depth(
     K: np.ndarray,
     lateral_min_px: float = LATERAL_DIRECTION_MIN_PX,
     depth_min_cm: float = DEPTH_DIRECTION_MIN_CM,
+    axis_half_width_deg: float = AXIS_DIRECTION_HALF_WIDTH_DEG,
 ) -> str:
     """
     用法: relation = describe_horizontal_relation_by_depth(target_corners_world, ref_corners_world, E_w2c, K)
-    作用: 用像素横向偏移判断左右，用相机深度差判断前后，并组合成 8 向关系。
-    输入: target/ref 的世界角点、world->camera 外参、相机内参、横向像素阈值和深度阈值。
+    作用: 在相机横向-深度平面上用角度扇区判断 8 向水平关系。
+    输入: target/ref 世界角点、world->camera 外参、相机内参、横向像素阈值、深度阈值和主方向半宽。
     输出: str，深度感知的水平方向关系；中心近似重合时返回 "near"。
     """
     target_uv = project_box_center_to_pixel(target_corners_world, E_w2c, K)
@@ -520,7 +521,15 @@ def describe_horizontal_relation_by_depth(
     ref_cam = project_box_center_to_camera(ref_corners_world, E_w2c)
 
     delta_u = float(target_uv[0] - ref_uv[0])
+    delta_v = float(target_uv[1] - ref_uv[1])
     delta_depth = float(target_cam[2] - ref_cam[2])
+    if (
+        abs(delta_u) <= float(lateral_min_px)
+        and abs(delta_v) <= float(lateral_min_px)
+        and abs(delta_depth) <= float(depth_min_cm)
+    ):
+        return "near"
+
     depth_threshold = compute_depth_direction_threshold(
         target_corners_world,
         ref_corners_world,
@@ -528,28 +537,16 @@ def describe_horizontal_relation_by_depth(
         min_depth_cm=depth_min_cm,
     )
 
-    is_right = delta_u > float(lateral_min_px)
-    is_left = delta_u < -float(lateral_min_px)
-    is_back = delta_depth > depth_threshold
-    is_front = delta_depth < -depth_threshold
-
-    if is_back:
-        if is_right:
-            return "the back right of"
-        if is_left:
-            return "the back left of"
-        return "behind"
-    if is_front:
-        if is_right:
-            return "the front right of"
-        if is_left:
-            return "the front left of"
-        return "in front of"
-    if is_right:
-        return "the right of"
-    if is_left:
-        return "the left of"
-    return "near"
+    # 将像素偏移和深度偏移归一化，保留更强的前后证据再计算角度。
+    direction_x = delta_u / float(lateral_min_px)
+    image_direction_y = delta_v / float(lateral_min_px)
+    depth_direction_y = -delta_depth / float(depth_threshold)
+    if abs(depth_direction_y) > abs(image_direction_y):
+        direction_y = depth_direction_y
+    else:
+        direction_y = image_direction_y
+    angle_deg = float(np.degrees(np.arctan2(direction_y, direction_x)))
+    return describe_angle_relation(angle_deg, axis_half_width_deg=axis_half_width_deg)
 
 def describe_spatial_relation(
     target_corners_world: np.ndarray,
