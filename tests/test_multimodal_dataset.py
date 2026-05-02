@@ -8,6 +8,8 @@ tests/test_multimodal_dataset.py
   验证 valid.json 缺失时会返回空数据集
 - test_multimodal_dataset_normalizes_points_and_box：
   验证点云、3D box 与 yaw 会按约定规则完成归一化
+- test_multimodal_dataset_caps_points_after_normalization：
+  验证点云采样不会影响归一化参数，并会限制进入模型的点数
 - test_multimodal_dataset_collate_batch_can_feed_model：
   验证 collate_fn 输出的 batch 可直接喂给多模态模型
 
@@ -345,6 +347,55 @@ def test_multimodal_dataset_normalizes_points_and_box(tmp_path, monkeypatch):
     assert "source_name" not in sample
     assert "target_box" not in sample
     assert "points_xyz" not in sample
+
+
+def test_multimodal_dataset_caps_points_after_normalization(tmp_path, monkeypatch):
+    """
+    作用：验证 max_points 会限制输出点数，且不改变完整点云计算出的归一化参数。
+
+    输入：
+        tmp_path: pytest 临时目录
+        monkeypatch: pytest monkeypatch 工具
+    输出：
+        无，通过断言验证结果
+    """
+    annotation_dir = _build_fake_multimodal_annotation_root(tmp_path)
+    monkeypatch.setattr("src.datasets.multimodal_dataset.PROJECT_ROOT", tmp_path)
+
+    dataset_a = PlacementMultimodalDataset(
+        annotation_dir=annotation_dir,
+        split="test",
+        max_points=2,
+        point_sample_seed=7,
+    )
+    dataset_b = PlacementMultimodalDataset(
+        annotation_dir=annotation_dir,
+        split="test",
+        max_points=2,
+        point_sample_seed=7,
+    )
+    sample_a = dataset_a[0]
+    sample_b = dataset_b[0]
+
+    expected_center = torch.tensor([2.0 / 3.0, 4.0 / 3.0, 0.0], dtype=torch.float32)
+    expected_scale = torch.tensor(4.0, dtype=torch.float32)
+    full_points = torch.tensor(
+        [
+            [-1.0 / 6.0, -1.0 / 3.0, 0.0],
+            [1.0 / 3.0, -1.0 / 3.0, 0.0],
+            [-1.0 / 6.0, 2.0 / 3.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    assert sample_a["points_xyz_norm"].shape == (2, 3)
+    assert torch.allclose(sample_a["norm_meta"]["scene_center"], expected_center, atol=1e-6)
+    assert torch.allclose(sample_a["norm_meta"]["scene_scale"], expected_scale, atol=1e-6)
+    assert torch.allclose(sample_a["points_xyz_norm"], sample_b["points_xyz_norm"])
+    assert all(
+        any(torch.allclose(point, full_point, atol=1e-6) for full_point in full_points)
+        for point in sample_a["points_xyz_norm"]
+    )
 
 
 def test_multimodal_dataset_collate_batch_can_feed_model(tmp_path, monkeypatch):

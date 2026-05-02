@@ -5,6 +5,7 @@ src/models/backbones/pc_backbone.py
 
 当前支持：
 - voxelnet：输出稠密 voxel embedding 及辅助稀疏信息
+- pointtransformerv3：输出 encoder-only batch-first token
 
 用法：
     from src.models.backbones.pc_backbone import PCBackbone
@@ -44,6 +45,12 @@ class PCBackbone(nn.Module):
     def __init__(self, cfg: Mapping[str, Any] | object):
         super().__init__()
         backbone_type = str(cfg_get(cfg, "type", "voxelnet")).lower()
+        if backbone_type in {"pointtransformerv3", "point_transformer_v3", "ptv3"}:
+            from src.models.backbones.pointtransformer_v3_encoder import PointTransformerV3Encoder
+
+            self.backbone = PointTransformerV3Encoder(cfg)
+            self.out_channels = self.backbone.out_channels
+            return
         if backbone_type != "voxelnet":
             raise ValueError(f"unsupported pc backbone type: {backbone_type}")
 

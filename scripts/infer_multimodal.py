@@ -229,6 +229,8 @@ def resolve_configs_from_checkpoint(
     dataset_cfg.setdefault("prompt_key", "polished_prompt")
     dataset_cfg.setdefault("image_size", [480, 640])
     dataset_cfg.setdefault("scale_eps", 1.0e-6)
+    dataset_cfg.setdefault("max_points", None)
+    dataset_cfg.setdefault("point_sample_seed", 42)
     return model_cfg, dataset_cfg, dataloader_cfg
 
 
@@ -246,6 +248,8 @@ def build_dataset(dataset_cfg: dict[str, Any], split: str) -> PlacementMultimoda
         prompt_key=str(dataset_cfg.get("prompt_key", "polished_prompt")),
         image_size=image_size,
         scale_eps=float(dataset_cfg.get("scale_eps", 1.0e-6)),
+        max_points=dataset_cfg.get("max_points"),
+        point_sample_seed=int(dataset_cfg.get("point_sample_seed", 42)),
     )
 
 

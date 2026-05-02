@@ -13,7 +13,7 @@ src/datasets/multimodal_dataset.py
     dataset = PlacementMultimodalDataset(
         annotation_dir="data/annotations/placement_multimodal",
         split="train",
-        num_points=2048,
+        max_points=65536,
     )
     dataloader = DataLoader(
         dataset,
@@ -25,6 +25,7 @@ src/datasets/multimodal_dataset.py
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -168,6 +169,45 @@ def _normalize_box(
     return box_norm.astype(np.float32)
 
 
+def _build_stable_sample_seed(point_sample_seed: int, split: str, sample_id: str) -> int:
+    """
+    用法: seed = _build_stable_sample_seed(42, "test", "sample_a")
+    作用: 根据基础种子、split 与 sample_id 构造跨进程稳定的采样种子
+    输入: point_sample_seed: int；split: str；sample_id: str
+    输出: int，可传给 numpy random generator
+    """
+    payload = f"{int(point_sample_seed)}:{split}:{sample_id}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
+
+
+def _sample_points(
+        points_xyz_norm: np.ndarray,
+        max_points: Optional[int],
+        split: str,
+        sample_id: str,
+        point_sample_seed: int) -> np.ndarray:
+    """
+    用法: points = _sample_points(points_xyz_norm, 65536, "train", "sample_a", 42)
+    作用: 将归一化点云限制到最多 max_points 个点，降低 batch padding 和模型显存
+    输入: points_xyz_norm: ndarray(N,3)；max_points: 点数上限或 None；
+         split/sample_id/point_sample_seed: 控制训练随机采样与评估稳定采样
+    输出: ndarray(M,3)，M <= max_points；未超过上限时返回原点云
+    """
+    if max_points is None or points_xyz_norm.shape[0] <= int(max_points):
+        return points_xyz_norm
+
+    if split == "train":
+        rng = np.random.default_rng()
+    else:
+        stable_seed = _build_stable_sample_seed(point_sample_seed, split, sample_id)
+        rng = np.random.default_rng(stable_seed)
+
+    indices = rng.choice(points_xyz_norm.shape[0], int(max_points), replace=False)
+    indices.sort()
+    return points_xyz_norm[indices]
+
+
 def _pad_points_for_batch(point_tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     """
     用法: padded_points, point_counts = _pad_points_for_batch(point_tensors)
@@ -207,21 +247,27 @@ class PlacementMultimodalDataset(Dataset):
         prompt_key: 文本字段名，支持 prompt 或 polished_prompt
         image_size: tuple[int, int]，统一后的图像尺寸 (H, W)
         scale_eps: float，场景尺度下限
+        max_points: int | None，单样本进入模型的点数上限，None 表示不采样
+        point_sample_seed: int，valid/test 确定性点云采样的基础随机种子
     输出：
         Dataset，可按索引返回归一化后的多模态样本
     """
 
     def __init__(
-            self,
-            annotation_dir: str | Path,
-            split: str = "train",
-            prompt_key: str = "polished_prompt",
-            image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
-            scale_eps: float = 1e-6):
+        self,
+        annotation_dir: str | Path,
+        split: str = "train",
+        prompt_key: str = "polished_prompt",
+        image_size: tuple[int, int] = DEFAULT_IMAGE_SIZE,
+        scale_eps: float = 1e-6,
+        max_points: Optional[int] = None,
+        point_sample_seed: int = 42):
         self.annotation_dir = Path(annotation_dir)
         self.split = "valid" if str(split).lower() == "val" else str(split).lower()
         self.prompt_key = str(prompt_key)
         self.scale_eps = float(scale_eps)
+        self.max_points = None if max_points is None else int(max_points)
+        self.point_sample_seed = int(point_sample_seed)
 
         if self.split not in VALID_SPLITS:
             raise ValueError(f"split must be one of {sorted(VALID_SPLITS)}, got {split}")
@@ -232,6 +278,8 @@ class PlacementMultimodalDataset(Dataset):
         self.image_size = (int(image_size[0]), int(image_size[1]))
         if min(self.image_size) <= 0:
             raise ValueError("image_size must be a length-2 tuple of positive integers")
+        if self.max_points is not None and self.max_points <= 0:
+            raise ValueError("max_points must be a positive integer or None")
 
         split_path = self.annotation_dir / f"{self.split}.json"
         if not split_path.exists():
@@ -266,6 +314,7 @@ class PlacementMultimodalDataset(Dataset):
         输出: dict，包含图像、归一化点云、文本、归一化 3D box 与归一化元信息
         """
         sample = self.samples[index]
+        sample_id = str(sample["sample_id"])
         rgb_path = _resolve_repo_path(str(sample["rgb_path"]))
         point_cloud_path = _resolve_repo_path(str(sample["point_cloud_path"]))
         if not rgb_path.exists():
@@ -284,6 +333,13 @@ class PlacementMultimodalDataset(Dataset):
             scene_center=scene_center,
             scene_scale=scene_scale,
         )
+        points_xyz_norm = _sample_points(
+            points_xyz_norm=points_xyz_norm,
+            max_points=self.max_points,
+            split=self.split,
+            sample_id=sample_id,
+            point_sample_seed=self.point_sample_seed,
+        )
 
         target_box = np.asarray(sample["placement"]["target_box"], dtype=np.float64)
         if target_box.shape != (7,):
@@ -299,7 +355,7 @@ class PlacementMultimodalDataset(Dataset):
             raise ValueError(f"Empty text field {self.prompt_key} for sample: {sample['sample_id']}")
 
         return {
-            "sample_id": str(sample["sample_id"]),
+            "sample_id": sample_id,
             "image": image,
             "points_xyz_norm": torch.from_numpy(points_xyz_norm).to(torch.float32),
             "text_input": text_input,

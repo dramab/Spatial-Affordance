@@ -1,0 +1,62 @@
+# ============================================================
+# configs/base/model_ptv3.yaml
+# 使用 PointTransformerV3 encoder-only 的模型结构配置
+# ============================================================
+
+image_backbone:
+  type: "resnet50"          # resnet50 | resnet101
+  pretrained: true
+  out_channels: 512
+  freeze: true
+
+pc_backbone:
+  type: "pointtransformerv3"
+  unit: "normalized"
+  grid_size: 0.05
+  point_cloud_range: [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+  in_channels: 3
+  order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+  stride: [2, 2, 2, 2]
+  enc_depths: [2, 2, 2, 6, 2]
+  enc_channels: [32, 64, 128, 256, 512]
+  enc_num_head: [2, 4, 8, 16, 32]
+  enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+  mlp_ratio: 4
+  qkv_bias: true
+  attn_drop: 0.0
+  proj_drop: 0.0
+  drop_path: 0.3
+  pre_norm: true
+  shuffle_orders: true
+  cls_mode: true
+  enable_flash: true
+  enable_rpe: false
+  upcast_attention: false
+  upcast_softmax: false
+
+text_encoder:
+  type: "roberta-base"
+  out_channels: 512
+  max_length: 512
+  freeze: true
+
+fusion:
+  type: "unified_transformer_encoder"
+  num_layers: 9
+  num_heads: 8
+  hidden_dim: 256
+  dropout: 0.1
+
+decoder:
+  type: "detr_decoder"
+  num_layers: 9
+  num_heads: 8
+  hidden_dim: 256
+  dropout: 0.1
+  num_queries: 1
+
+bbox3d_head:
+  hidden_dim: 256
+  num_layers: 2
+  out_dim: 7                # cx, cy, cz, log_l, log_w, log_h, yaw
+

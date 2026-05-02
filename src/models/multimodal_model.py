@@ -99,6 +99,12 @@ class MultimodalModel(nn.Module):
         if points_xyz is None:
             return None
         point_outputs = self.pc_backbone(points_xyz, point_feats)
+        if {"tokens", "token_mask", "token_pos"}.issubset(point_outputs.keys()):
+            return {
+                "tokens": point_outputs["tokens"],
+                "token_mask": point_outputs["token_mask"],
+                "token_pos": point_outputs["token_pos"],
+            }
         token_dict = build_padded_voxel_tokens(
             dense_voxel_feats=point_outputs["dense_voxel_feats"],
             valid_mask=point_outputs["valid_mask"],

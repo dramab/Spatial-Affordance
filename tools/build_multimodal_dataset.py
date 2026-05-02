@@ -392,15 +392,16 @@ def build_frame_lookup(
             sample_id = str(record["sample_id"])
             scene_id = str(record["scene_id"])
             frame_id = str(record["frame_id"])
+            image_filename = f"{source_name}__{sample_id}.png"
+            if image_filename not in available_rgb_filenames:
+                continue
+
             label_key = (source_name, sample_id)
             if label_key not in label_lookup:
                 raise KeyError(f"Missing label for sample: {label_key}")
 
             point_cloud_path = point_cloud_dir / f"{scene_id}_{frame_id}.ply"
             grid_meta_path = grid_meta_dir / f"{scene_id}_{frame_id}.json"
-            image_filename = f"{source_name}__{sample_id}.png"
-            if image_filename not in available_rgb_filenames:
-                continue
 
             base_record = {
                 "sample_id": sample_id,
@@ -576,10 +577,8 @@ def enrich_records_with_frame_meta(
                 if not path.exists():
                     raise FileNotFoundError(f"Missing {key} file for {item['sample_id']}: {path}")
 
-            polished_label = str(label_record.get("polished_label", "")).strip()
             raw_label = str(label_record.get("label", "")).strip()
-            if not polished_label:
-                raise ValueError(f"Empty polished_label for sample: {item['sample_id']}")
+            polished_label = str(label_record.get("polished_label", "") or "").strip()
             if not raw_label:
                 raise ValueError(f"Empty label for sample: {item['sample_id']}")
 

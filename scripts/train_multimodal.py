@@ -241,6 +241,8 @@ def build_dataset(dataset_cfg: dict[str, Any], split: str) -> PlacementMultimoda
         prompt_key=str(dataset_cfg.get("prompt_key", "polished_prompt")),
         image_size=image_size,
         scale_eps=float(dataset_cfg.get("scale_eps", 1e-6)),
+        max_points=dataset_cfg.get("max_points"),
+        point_sample_seed=int(dataset_cfg.get("point_sample_seed", 42)),
     )
 
 

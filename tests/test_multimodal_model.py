@@ -71,6 +71,42 @@ class _FakeModel(torch.nn.Module):
         return SimpleNamespace(last_hidden_state=self.embedding(input_ids))
 
 
+class _FakeTokenPointBackbone(torch.nn.Module):
+    """
+    作用：在单元测试中模拟直接返回 token 的点云 backbone。
+
+    输入：
+        points_xyz: Tensor(B, N, 3)
+        point_feats: 可选点特征
+    输出：
+        dict，包含 tokens、token_mask、token_pos
+    """
+
+    out_channels = 32
+
+    def forward(self, points_xyz, point_feats=None):
+        """
+        作用：返回固定长度的 batch-first 点云 token。
+
+        输入：
+            points_xyz: Tensor(B, N, 3) 点云坐标
+            point_feats: 可选点特征
+        输出：
+            dict，包含 tokens、token_mask、token_pos
+        """
+        del point_feats
+        batch_size = int(points_xyz.shape[0])
+        device = points_xyz.device
+        tokens = torch.ones((batch_size, 3, self.out_channels), dtype=torch.float32, device=device)
+        token_mask = torch.ones((batch_size, 3), dtype=torch.bool, device=device)
+        token_pos = points_xyz[:, :3].to(torch.float32)
+        return {
+            "tokens": tokens,
+            "token_mask": token_mask,
+            "token_pos": token_pos,
+        }
+
+
 def _make_model_cfg() -> dict:
     """
     作用：构造轻量化多模态模型测试配置。
@@ -188,6 +224,35 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
     assert outputs["modality_lengths"]["text"] == 6
+
+
+def test_multimodal_model_accepts_direct_point_tokens(monkeypatch):
+    """
+    作用：验证模型可直接消费点云 backbone 返回的 token 字典。
+
+    输入：
+        无，内部替换点云 backbone 为 token 输出模拟器
+    输出：
+        无，通过断言验证点云分支长度
+    """
+    monkeypatch.setattr(
+        "src.models.encoders.text_encoder.AutoTokenizer.from_pretrained",
+        lambda _: _FakeTokenizer(),
+    )
+    monkeypatch.setattr(
+        "src.models.encoders.text_encoder.AutoModel.from_pretrained",
+        lambda _: _FakeModel(),
+    )
+
+    model = MultimodalModel(_make_model_cfg())
+    model.pc_backbone = _FakeTokenPointBackbone()
+    points_xyz = _make_points_batch()
+
+    outputs = model(points_xyz=points_xyz)
+
+    assert outputs["memory"].shape[1] == 3
+    assert outputs["modality_lengths"]["point"] == 3
+    assert outputs["memory_mask"].all()
 
 
 def test_multimodal_model_requires_at_least_one_modality(monkeypatch):

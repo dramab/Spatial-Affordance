@@ -152,7 +152,67 @@ Forbidden 5 (hallucinated visual attribute): "Move the green square apple..." (a
 Forbidden 6 (extra content): "Enriched instruction: Move the red apple..." (added extra explanation)
 Now, output your refined instruction strictly following the rules above:
 """
-    return prompt3
+
+    prompt4 = f"""
+You are a professional, strictly rule-abiding robotic operation annotation refinement specialist.
+Your task is to enrich and restructure the provided original English operation instruction based STRICTLY on the visual evidence in the accompanying image. 
+
+Image Context Information: 
+* The specific object that needs to be moved is highlighted with an orange bounding box.
+* The final empty placement destination (the spatial void where the object will go) is highlighted with a green bounding box.
+* The original instruction may mention spatial reference objects. The reference object for the starting position is the physical object closest to the orange box. The reference object for the final destination is the physical object closest to the green box.
+
+Original Operation Instruction: "{original_label}"
+Reference Image: [User Uploads Image]
+
+============= ABSOLUTE NON-NEGOTIABLE RULES =============
+1. STRICT IMAGE GROUNDING & VISUAL CONTEXT: Every single enrichment MUST accurately reflect the actual visual evidence. Do not hallucinate. Use the bounding boxes ONLY for your internal reference to locate objects. NEVER mention the boxes (orange/green/bounding box) in your final output.
+2. CORE SEMANTIC PRESERVATION WITH SYNTACTIC FLEXIBILITY: You must preserve the exact physical intent (which object is manipulated and its final destination). You are required to increase linguistic diversity by varying grammatical structures and sentence templates, though the standard "Move" structure is still permitted as one of the options.
+3. PERMITTED VISUAL ENRICHMENT (ONLY 3 TYPES ALLOWED): You must add descriptive attributes derived entirely from the image to EVERY concrete object noun:
+    * Color attributes (e.g., red, blue, green, silver etc.)
+    * Shape/geometry attributes (e.g., round, cylindrical, square, flat etc.)
+    * Size/scale attributes (e.g., small, larger, tall, short, slender etc.)
+    ❌ FORBIDDEN: Material, packaging, brand, texture, or annotations.
+4. LINGUISTIC & SYNTACTICAL DIVERSITY (CRITICAL): Do not strictly place adjectives right before the noun. You MUST randomly mix the following grammatical structures to inject visual attributes:
+    * Pre-modifiers (e.g., "the red round apple")
+    * Relative clauses (e.g., "the apple, which is red and round")
+    * Appositives (e.g., "the block, a red square one")
+    * Prepositional phrases (e.g., "the cup with a blue cylindrical shape")
+5. SENTENCE STRUCTURE VARIETY: You MUST randomly select ONE of the following sentence templates for your output to ensure dataset diversity:
+    * Template A (Pick-and-Place Decomposition): "Pick up / Grab [Target] and place / set it down [Destination]"
+    * Template B (Advanced Synonyms): "Relocate / Transfer / Position / Shift [Target] to [Destination]"
+    * Template C (Goal-oriented): "Make sure / Ensure that [Target] is positioned / ends up [Destination]"
+    * Template D (Standard Imperative): "Move [Target] to [Destination]"
+    ❌ FORBIDDEN: Do not use conversational or polite filler phrases (e.g., "Could you please", "I need you to").
+6. MULTIPLE INSTANCE DISAMBIGUATION: If the image contains multiple objects of the same category, use the orange box and green box to locate the exact target/destination, and use the closest physical reference objects + size attributes to perfectly disambiguate them.
+7. OUTPUT REQUIREMENT: You MUST output ONLY the final enriched and restructured complete English sentence. No explanations, notes, or extra content.
+
+============= CORRECT EXAMPLES (SHOWCASING DIVERSITY) =============
+Example 1 (Template A + Relative Clause):
+Original Input: "Move the apple located behind the plate to the right of the fork."
+Correct Output: "Pick up the apple, which is red and round, located directly behind the white flat plate, and set it down slightly to the right of the silver slender fork."
+
+Example 2 (Template B + Pre-modifiers & Diverse Adverbs):
+Original Input: "Move the cup near the block to the cup."
+Correct Output: "Relocate the blue cylindrical cup closely near the red square block directly to the empty space immediately next to the yellow cylindrical cup."
+
+Example 3 (Template C + Appositives & Size Disambiguation):
+Original Input: "Move TunaCan located at the left of Clamp to the right of Clamp."
+Correct Output: "Ensure that the TunaCan (the blue cylindrical one) located just to the left of the smaller black Clamp ends up securely positioned to the right of the bigger black Clamp."
+
+Example 4 (Template D + Prepositional Phrase):
+Original Input: "Move the block to the plate."
+Correct Output: "Move the block with a small green square shape exactly to the center of the large white round plate."
+
+============= FORBIDDEN EXAMPLES =============
+Forbidden 1 (Conversational filler): "Could you please move the red apple..." (VIOLATION: Conversational tone is explicitly forbidden in Rule 5.)
+Forbidden 2 (Mentioned bounding boxes): "Grab the cup in the orange box..." (VIOLATION: Mentioned annotation boxes.)
+Forbidden 3 (Hallucinated material): "Ensure the ceramic plate..." (VIOLATION: Added material attribute.)
+Forbidden 4 (Changed physical intent): "Relocate the fork to the apple." (VIOLATION: Changed the target and destination logic.)
+
+Now, randomly select a diverse grammatical structure and a sentence template (A, B, C, or D), and output your refined instruction strictly following the rules above:
+"""
+    return prompt4
 
 def polish_single_sample(image_path: Path, original_label: str) -> dict:
     """

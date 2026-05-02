@@ -8,6 +8,10 @@ tests/test_build_multimodal_dataset.py
   验证脚本会正确对齐多模态数据并写出 train/test/summary
 - test_build_dataset_raises_on_missing_label：
   验证缺失文本标签时会抛出明确错误
+- test_build_dataset_allows_missing_polished_label：
+  验证缺失 polished_label 时会写入空字符串
+- test_build_frame_lookup_ignores_samples_without_rgb_before_label_check：
+  验证无 RGB 的样本不会要求存在文本标签
 
 用法：
     pytest tests/test_build_multimodal_dataset.py -v
@@ -382,6 +386,145 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
         [2.0, 4.0, 4.0],
         atol=1e-6,
     )
+
+
+def test_build_dataset_allows_missing_polished_label(tmp_path, monkeypatch):
+    """
+    作用：验证 polished_label 缺失时不会报错，并会写入空字符串。
+
+    输入：
+        tmp_path: pytest 临时目录
+        monkeypatch: pytest monkeypatch 工具
+    输出：
+        无，通过断言验证结果
+    """
+    rgb_dir = tmp_path / "outputs/placement_rgb_bbox_vis"
+    hope_dir = tmp_path / "outputs/hope"
+    output_dir = tmp_path / "data/annotations/placement_multimodal"
+    label_json = tmp_path / "outputs/auto_labels/all_labels.json"
+
+    rgb_dir.mkdir(parents=True, exist_ok=True)
+    (rgb_dir / "hope__scene_0000_0000_obj_0_p000.png").write_bytes(b"png")
+    _write_ascii_ply(
+        hope_dir / "point_clouds/scene_0000_0000.ply",
+        np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+    )
+    _write_json(hope_dir / "grid_meta/scene_0000_0000.json", {"grid": "meta"})
+    _write_json(
+        hope_dir / "samples/scene_0000_0000.json",
+        {
+            "samples": [
+                {
+                    "sample_id": "scene_0000_0000_obj_0_p000",
+                    "scene_id": "scene_0000",
+                    "frame_id": "0000",
+                    "canonical_aabb_object": [-1, -1, -1, 1, 1, 1],
+                    "transform_world": _make_transform((0.0, 0.0, 0.0)),
+                    "center_world": [0.0, 0.0, 0.0],
+                    "aabb_world": [-1, -1, -1, 1, 1, 1],
+                    "yaw_degrees": 0.0,
+                }
+            ]
+        },
+    )
+    _write_json(
+        label_json,
+        [
+            {
+                "image_filename": "hope__scene_0000_0000_obj_0_p000.png",
+                "sample_id": "scene_0000_0000_obj_0_p000",
+                "source_name": "hope",
+                "label": "raw prompt",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(build_multimodal_dataset, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        build_multimodal_dataset,
+        "build_source_configs",
+        lambda _source_names: {"hope": {"dataset": {"root_dir": "/unused"}}},
+    )
+
+    def _fake_load_camera_for_frame(source_name, source_cfg, scene_id, frame_id):
+        """
+        作用：返回固定测试相机参数，避免读取真实数据集。
+        """
+        del source_name, source_cfg, scene_id, frame_id
+        return _make_fake_camera_dict()
+
+    monkeypatch.setattr(
+        build_multimodal_dataset,
+        "load_camera_for_frame",
+        _fake_load_camera_for_frame,
+    )
+
+    summary = build_multimodal_dataset.build_multimodal_dataset(
+        rgb_dir=rgb_dir,
+        label_json=label_json,
+        source_dirs=[hope_dir],
+        output_dir=output_dir,
+        train_ratio=0.8,
+        valid_ratio=0.1,
+        seed=42,
+    )
+
+    assert summary["total_samples"] == 1
+    payloads = [
+        json.loads((output_dir / split_name).read_text(encoding="utf-8"))
+        for split_name in ("train.json", "valid.json", "test.json")
+    ]
+    samples = [sample for payload in payloads for sample in payload["samples"]]
+    assert samples[0]["prompt"] == "raw prompt"
+    assert samples[0]["polished_prompt"] == ""
+
+
+def test_build_frame_lookup_ignores_samples_without_rgb_before_label_check(tmp_path, monkeypatch):
+    """
+    作用：验证缺少 RGB 的样本会先被过滤，不会触发缺失 label 错误。
+
+    输入：
+        tmp_path: pytest 临时目录
+        monkeypatch: pytest monkeypatch 工具
+    输出：
+        无，通过断言验证结果
+    """
+    hope_dir = tmp_path / "outputs/hope"
+    _write_json(
+        hope_dir / "samples/scene_0000_0000.json",
+        {
+            "samples": [
+                {
+                    "sample_id": "scene_0000_0000_obj_0_p000",
+                    "scene_id": "scene_0000",
+                    "frame_id": "0000",
+                },
+                {
+                    "sample_id": "scene_0000_0000_obj_1_p000",
+                    "scene_id": "scene_0000",
+                    "frame_id": "0000",
+                },
+            ]
+        },
+    )
+    label_lookup = {
+        ("hope", "scene_0000_0000_obj_0_p000"): {
+            "sample_id": "scene_0000_0000_obj_0_p000",
+            "source_name": "hope",
+            "label": "raw prompt",
+        }
+    }
+
+    monkeypatch.setattr(build_multimodal_dataset, "PROJECT_ROOT", tmp_path)
+    frame_lookup = build_multimodal_dataset.build_frame_lookup(
+        source_dirs=[hope_dir],
+        label_lookup=label_lookup,
+        available_rgb_filenames={"hope__scene_0000_0000_obj_0_p000.png"},
+    )
+
+    assert list(frame_lookup.keys()) == [("hope", "scene_0000", "0000")]
+    assert len(frame_lookup[("hope", "scene_0000", "0000")]) == 1
+    assert frame_lookup[("hope", "scene_0000", "0000")][0]["sample_id"] == "scene_0000_0000_obj_0_p000"
 
 
 def test_build_dataset_raises_on_missing_label(tmp_path, monkeypatch):

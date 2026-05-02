@@ -18,10 +18,12 @@ tests/test_voxelnet_encoder.py
     pytest tests/test_voxelnet_encoder.py -v
 """
 
+import pytest
 import torch
 
 from src.models.backbones import (
     PCBackbone,
+    PointTransformerV3Encoder,
     VoxelNetEncoder,
     build_padded_voxel_tokens,
     flatten_voxel_grid_for_transformer,
@@ -44,6 +46,35 @@ def _make_points_batch(num_points: int, scale: float = 1.0) -> torch.Tensor:
     xx, yy, zz = torch.meshgrid(axis, axis, axis, indexing="ij")
     pts = torch.stack([xx.reshape(-1), yy.reshape(-1), zz.reshape(-1)], dim=-1)
     return pts.unsqueeze(0)
+
+
+def _make_light_ptv3_cfg(enable_flash: bool = False) -> dict:
+    """
+    构造轻量化 PointTransformerV3 encoder-only 测试配置。
+
+    输入:
+        enable_flash: bool 是否启用 FlashAttention
+    输出:
+        dict PTv3 点云 backbone 配置
+    """
+    return {
+        "type": "pointtransformerv3",
+        "grid_size": 0.1,
+        "point_cloud_range": [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        "in_channels": 3,
+        "order": ["z"],
+        "stride": [2],
+        "enc_depths": [1, 1],
+        "enc_channels": [8, 16],
+        "enc_num_head": [1, 2],
+        "enc_patch_size": [16, 16],
+        "enable_flash": enable_flash,
+        "enable_rpe": False,
+        "upcast_attention": False,
+        "upcast_softmax": False,
+        "drop_path": 0.0,
+        "shuffle_orders": False,
+    }
 
 
 def test_voxelize_points_discards_out_of_range_points():
@@ -304,6 +335,102 @@ def test_pc_backbone_voxelnet_instantiation():
     assert "grid_meta" in outputs
     assert outputs["dense_voxel_feats"].shape[1] == 32
     assert outputs["grid_meta"]["point_cloud_range"] == (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0)
+
+
+def test_pointtransformer_v3_encoder_filters_invalid_points():
+    """
+    验证 PTv3 适配器会过滤 padding NaN 和越界点。
+
+    输入:
+        无，内部构造包含有效点、NaN padding 和越界点的 batch
+    输出:
+        无，通过断言验证展开后的有效点
+    """
+    pytest.importorskip("spconv.pytorch")
+    pytest.importorskip("torch_scatter")
+
+    encoder = PointTransformerV3Encoder(_make_light_ptv3_cfg(enable_flash=False))
+    points_xyz = torch.tensor([
+        [
+            [0.0, 0.0, 0.0],
+            [0.2, 0.2, 0.2],
+            [float("nan"), float("nan"), float("nan")],
+            [1.2, 0.0, 0.0],
+        ],
+        [
+            [-0.4, -0.4, -0.4],
+            [0.8, 0.8, 0.8],
+            [0.0, 1.1, 0.0],
+            [float("nan"), float("nan"), float("nan")],
+        ],
+    ], dtype=torch.float32)
+
+    flat_xyz, flat_feats, batch_indices = encoder._flatten_valid_points(points_xyz, None)
+
+    assert flat_xyz.shape == (4, 3)
+    assert flat_feats.shape == (4, 3)
+    assert batch_indices.tolist() == [0, 0, 1, 1]
+    assert torch.isfinite(flat_xyz).all()
+
+
+def test_pc_backbone_pointtransformer_v3_encoder_only_forward():
+    """
+    验证统一 backbone 可实例化 PTv3 encoder-only，并返回 batch-first token。
+
+    输入:
+        无，内部构造随机 normalized 点云
+    输出:
+        无，通过断言验证 token 输出和 decoder 不存在
+    """
+    pytest.importorskip("spconv.pytorch")
+    pytest.importorskip("torch_scatter")
+    pytest.importorskip("flash_attn")
+    if not torch.cuda.is_available():
+        pytest.skip("PointTransformerV3 FlashAttention forward requires CUDA")
+
+    device = torch.device("cuda")
+    backbone = PCBackbone(_make_light_ptv3_cfg(enable_flash=True)).to(device).eval()
+    points_xyz = torch.rand((2, 64, 3), device=device) * 1.6 - 0.8
+    points_xyz[0, -4:] = float("nan")
+
+    with torch.no_grad():
+        outputs = backbone(points_xyz)
+
+    assert not hasattr(backbone.backbone.model, "dec")
+    assert set(outputs.keys()) == {"tokens", "token_mask", "token_pos"}
+    assert outputs["tokens"].shape[:2] == outputs["token_mask"].shape
+    assert outputs["token_pos"].shape[:2] == outputs["token_mask"].shape
+    assert outputs["tokens"].shape[-1] == 16
+    assert outputs["token_mask"].dtype == torch.bool
+    assert outputs["token_mask"].any()
+
+
+def test_pointtransformer_v3_non_flash_handles_empty_middle_sample():
+    """
+    验证 PTv3 非 Flash 路径可处理 batch 中间的空样本。
+
+    输入:
+        无，内部构造第二个样本全为 NaN padding 的 batch
+    输出:
+        无，通过断言验证空样本 token mask 为空
+    """
+    pytest.importorskip("spconv.pytorch")
+    pytest.importorskip("torch_scatter")
+    if not torch.cuda.is_available():
+        pytest.skip("PointTransformerV3 sparse convolution forward requires CUDA")
+
+    device = torch.device("cuda")
+    backbone = PCBackbone(_make_light_ptv3_cfg(enable_flash=False)).to(device).eval()
+    points_xyz = torch.rand((3, 64, 3), device=device) * 1.6 - 0.8
+    points_xyz[1] = float("nan")
+
+    with torch.no_grad():
+        outputs = backbone(points_xyz)
+
+    assert outputs["token_mask"].shape[0] == 3
+    assert outputs["token_mask"][0].any()
+    assert not outputs["token_mask"][1].any()
+    assert outputs["token_mask"][2].any()
 
 
 def test_build_padded_voxel_tokens_returns_batch_first_layout():
