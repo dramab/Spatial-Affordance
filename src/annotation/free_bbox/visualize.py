@@ -13,7 +13,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 from src.annotation.free_bbox.occupancy import FREE, OCCUPIED
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners

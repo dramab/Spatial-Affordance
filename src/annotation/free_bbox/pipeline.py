@@ -40,7 +40,7 @@ from src.annotation.free_bbox.filters import (
 from src.annotation.free_bbox.cluster import cluster_placements
 from src.annotation.free_bbox.io_utils import (
     save_ply, save_occupancy_ply, save_placement_annotations,
-    save_placement_samples, save_grid_meta,
+    save_placement_samples, save_grid_meta, camera_to_json,
 )
 from src.utils.coord_utils import transform_points
 
@@ -144,12 +144,10 @@ class PlacementPipeline:
 
     属性:
         config: PlacementConfig 配置参数
-        use_gpu: bool 是否使用 GPU 加速
     """
 
-    def __init__(self, config: PlacementConfig = None, use_gpu: bool = False):
+    def __init__(self, config: PlacementConfig = None):
         self.config = config or PlacementConfig()
-        self.use_gpu = use_gpu
 
     def run(self, scene: SceneData, output_dir: str = None,
             save_vis: bool = True) -> dict:
@@ -219,13 +217,14 @@ class PlacementPipeline:
                     "scene_id": scene.scene_id,
                     "frame_id": scene.frame_id,
                     "unit": scene.unit,
+                    "camera": camera_to_json(camera),
                 })
             save_occupancy_ply(
                 output_paths["occupancy_grid_ply"],
                 grid_base,
                 grid_min,
                 vs,
-                states=[FREE, OCCUPIED])
+                states=[OCCUPIED])
 
         # ── Step 4 & 5: 逐物体放置规划 ──────────────────────────────────
         print("[4/6] Planning placements ...")
@@ -301,7 +300,6 @@ class PlacementPipeline:
                 table_z, surface_mask,
                 safety_margin=cfg.safety_margin,
                 yaw_steps=cfg.yaw_steps,
-                use_gpu=self.use_gpu,
                 preserve_orientation=cfg.preserve_orientation,
                 orientation_threshold_deg=cfg.orientation_threshold_deg)
             n_raw = meta["valid_raw"]

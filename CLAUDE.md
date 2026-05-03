@@ -37,12 +37,6 @@ python tools/run_placement.py \
     --batch --workers 8 \
     --output outputs/placement
 
-# GPU 加速（CuPy FFT）
-python tools/run_placement.py \
-    --config configs/annotation/placement.yaml \
-    --batch --gpu \
-    --output outputs/placement
-
 # 查看处理状态（显示 completed/processing/failed 统计）
 python tools/run_placement.py \
     --config configs/annotation/placement.yaml \
@@ -135,7 +129,7 @@ PlacementPipeline.run(scene_data)
 | `src/annotation/free_bbox/pipeline.py` | `PlacementPipeline`：编排完整 6 步流程 |
 | `src/annotation/free_bbox/occupancy.py` | 深度图→点云+射线投射体素占据格 |
 | `src/annotation/free_bbox/surface.py` | RANSAC 支撑面检测，选取与目标物体最近的候选面 |
-| `src/annotation/free_bbox/collision.py` | FFT 碰撞检测，可选 CuPy GPU 加速 |
+| `src/annotation/free_bbox/collision.py` | FFT 碰撞检测 |
 | `src/annotation/free_bbox/filters.py` | 可见性/稳定性/遮挡三类过滤器 |
 | `src/annotation/free_bbox/cluster.py` | DBSCAN 聚类，按自由空间分值选代表 |
 | `src/annotation/free_bbox/state_tracker.py` | OOM Kill 容错：状态跟踪文件管理 |
@@ -154,10 +148,6 @@ PlacementPipeline.run(scene_data)
 ### 并行处理
 
 `run_placement.py` 使用 `multiprocessing.ProcessPoolExecutor`（spawn 上下文）。每个 worker 独立重建 config、adapter 和 pipeline，无需共享状态。
-
-### GPU 加速
-
-FFT 碰撞检测（`collision.py`）：有 CuPy 时自动使用 `cupyx.scipy.signal.fftconvolve`，否则降级至 NumPy/SciPy，行为一致。
 
 ---
 

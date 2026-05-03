@@ -20,7 +20,7 @@ from scipy.ndimage import binary_erosion
 from src.utils.coord_utils import transform_points, project_world
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners
 from src.annotation.free_bbox.voxel_utils import voxel_to_world
-from src.annotation.free_bbox.occupancy import FREE, OCCUPIED
+from src.annotation.free_bbox.occupancy import OCCUPIED
 
 
 def is_fully_visible(bbox3d, pose_cam, fx, fy, cx, cy, img_w, img_h,

@@ -332,18 +332,16 @@ def rotation_z_3x3(angle_rad: float) -> np.ndarray:
 
 def compute_placed_transform(bbox3d_canonical: np.ndarray,
                              center_world: np.ndarray,
-                             yaw_rad: float,
-                             world_up_axis: int = 2) -> np.ndarray:
+                             yaw_rad: float) -> np.ndarray:
     """
     计算物体放置到指定位置的 4×4 object→world 变换矩阵。
 
-    将物体规范坐标系的 AABB 中心平移到 center_world，并绕 world_up 轴旋转 yaw_rad。
+    将物体规范坐标系的 AABB 中心平移到 center_world，并绕 Z 轴旋转 yaw_rad。
 
     输入:
         bbox3d_canonical: (6,) [min_x, min_y, min_z, max_x, max_y, max_z]
         center_world: (3,) 目标世界坐标中心
         yaw_rad: yaw 旋转角度（弧度）
-        world_up_axis: 世界坐标系上方向轴索引（默认 2 = Z-up）
     输出:
         (4, 4) object→world 变换矩阵
     """
@@ -406,9 +404,14 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
     """
     分析物体姿态是否为可直接保留的轴对齐稳定姿态。
 
+    作用:
+        同时检查物体 canonical 坐标系的 3 个局部轴，只要任意一个局部轴
+        与世界竖直方向足够对齐，即认为当前姿态是稳定且可保留的轴对齐姿态。
+        最长轴和最短轴只用于补充区分竖立/平放类型，不作为合理性的必要条件。
+
     输入:
         T_obj2world: (4, 4) object→world 变换矩阵
-        bbox3d_canonical: (6,) 物体 canonical AABB，用于估计长轴/短轴
+        bbox3d_canonical: (6,) 物体 canonical AABB，用于估计 3 个局部轴尺寸
         flat_threshold_deg: 平放姿态容差（度）
         upright_threshold_deg: 竖立姿态容差（度）
     输出:
@@ -424,7 +427,8 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
             - is_reasonable: 是否为合理姿态（轴对齐稳定姿态）
 
     判定规则:
-        - 先找到最接近世界竖直方向的局部轴
+        - 计算 3 个局部轴分别与世界竖直方向的对齐程度
+        - 选择其中最接近竖直方向的局部轴作为当前竖直轴
         - 若该轴与竖直方向夹角足够小，则视为轴对齐稳定姿态，可保留原始 roll/pitch
         - 若该轴恰好是 canonical 最短轴，则额外标记为平放
         - 若该轴恰好是 canonical 最长轴，则额外标记为竖立
@@ -442,7 +446,8 @@ def analyze_pose_orientation(T_obj2world: np.ndarray,
     flat_axis_index = int(np.argmin(axis_sizes))
     upright_axis_index = int(np.argmax(axis_sizes))
 
-    # 通过局部轴和世界竖直方向的夹角判断姿态，减少欧拉角分解歧义带来的误判。
+    # 同时检查 3 个局部轴，只要其中任意一轴接近世界竖直方向，即认为姿态轴对齐。
+    # 最长轴/最短轴仅用于区分竖立和平放，不限制 is_reasonable 的判定。
     up_world = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     axis_alignments = np.abs(R.T @ up_world)
     vertical_axis_index = int(np.argmax(axis_alignments))

@@ -26,14 +26,10 @@ def get_bbox_corners(bbox3d):
         (8, 3) float64 角点坐标
     """
     mn, mx = np.array(bbox3d[:3]), np.array(bbox3d[3:])
-    corners = []
-    for zi in range(2):
-        for yi in range(2):
-            for xi in range(2):
-                corners.append([[mn[0], mx[0]][xi],
-                                [mn[1], mx[1]][yi],
-                                [mn[2], mx[2]][zi]])
-    return np.array(corners, dtype=np.float64)
+    # 8 个角点的 min/max 选择掩码，顺序与原三重循环完全一致
+    idx = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
+                    [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]])
+    return np.where(idx, mx, mn)
 
 
 def obb_corners_world(bbox3d, T_obj2world):
@@ -61,20 +57,21 @@ CONTACT_FACE_CORNERS = {
 }
 
 
-def get_contact_face_indices(pose_world, E_w2c,
+def get_contact_face_indices(pose_world,
                               world_up=np.array([0.0, 0.0, 1.0])):
     """
-    根据世界上方向、外参和物体姿态，动态确定接触面（底面）的 4 个角点索引。
+    根据世界上方向和物体姿态，动态确定接触面（底面）的 4 个角点索引。
 
     原理:
-        down_cam = R_w2c @ (-world_up)
-        down_obj = R_pose_world_inv @ down_cam_world = R_pose.T @ (-world_up)
-        主导轴（|down_obj| 最大的分量）决定接触哪个 AABB 面。
+        world_up 为世界坐标系上方向（默认 Z-up），世界下方向（重力）为 -world_up。
+        将世界下方向变换到物体坐标系：down_obj = R_pose.T @ (-world_up)
+        其中 R_pose = pose_world[:3, :3] 为 object→world 旋转矩阵，
+        R_pose.T 即其逆（world→object 旋转）。
+        |down_obj| 最大的分量对应"重力方向在物体坐标系中最接近的轴"，
+        该分量的符号决定取该轴的 min 面还是 max 面作为接触面（底面）。
 
     输入:
         pose_world: (4, 4) object→world 变换矩阵
-        E_w2c: (4, 4) world→camera 变换矩阵（此处仅用于兼容，
-               实际通过 world_up 直接在世界坐标系计算）
         world_up: (3,) 世界坐标系上方向
     输出:
         list[int] 4 个角点索引

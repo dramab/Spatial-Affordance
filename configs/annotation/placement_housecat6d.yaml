@@ -20,7 +20,6 @@ placement:
   min_surface_area: 50.0          # 最小支撑面面积
   min_support_ratio: 1.0          # 最小支撑比
   occlusion_threshold: 0.2        # 遮挡阈值
-  world_up: [0.0, 0.0, 1.0]       # 世界坐标系上方向
   preserve_orientation: true      # 是否保留原始合理姿态
   orientation_threshold_deg: 5 # 姿态判断容差（度）
 
@@ -31,12 +30,10 @@ clustering:
 
 # 可视化
 visualization:
-  vis_margin_px: 30
   save_vis: true
 
 # 计算
 compute:
-  use_gpu: false
   stability_chunk_size: 2000
 
 # 输出

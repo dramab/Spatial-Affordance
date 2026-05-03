@@ -59,12 +59,6 @@ tools/run_placement.py
         --clear-failed \
         --output outputs/placement
 
-    # 使用 GPU 加速
-    python tools/run_placement.py \
-        --config configs/annotation/placement.yaml \
-        --batch --gpu \
-        --output outputs/placement
-
 配置示例 (placement.yaml):
     dataset:
       skip_frames:                  # 跳过特定场景的特定帧
@@ -164,8 +158,6 @@ def build_placement_config(cfg):
     vis = cfg.get("visualization", {})
     comp = cfg.get("compute", {})
 
-    world_up = plc.get("world_up", [0, 0, 1])
-
     return PlacementConfig(
         voxel_size=occ.get("voxel_size", 1.0),
         pixel_stride=occ.get("pixel_stride", 4),
@@ -177,8 +169,6 @@ def build_placement_config(cfg):
         occlusion_threshold=plc.get("occlusion_threshold", 0.3),
         dbscan_eps=clu.get("dbscan_eps"),
         dbscan_min_samples=clu.get("dbscan_min_samples", 1),
-        world_up=tuple(world_up),
-        vis_margin_px=vis.get("vis_margin_px", 30),
         stability_chunk_size=comp.get("stability_chunk_size", 2000),
         preserve_orientation=plc.get("preserve_orientation", True),
         orientation_threshold_deg=plc.get("orientation_threshold_deg", 15.0),
@@ -259,7 +249,7 @@ def filter_skipped_frames(tasks, skip_frames_config):
 
 
 def process_task_worker(config_path, scene_path, frame_id,
-                        output_root, save_vis, use_gpu):
+                        output_root, save_vis):
     """
     子进程 worker：独立完成单个 scene/frame 任务。
 
@@ -277,7 +267,7 @@ def process_task_worker(config_path, scene_path, frame_id,
         cfg = load_config(config_path)
         adapter = build_adapter(cfg)
         placement_cfg = build_placement_config(cfg)
-        pipeline = PlacementPipeline(config=placement_cfg, use_gpu=use_gpu)
+        pipeline = PlacementPipeline(config=placement_cfg, )
 
         process_single(
             adapter=adapter,
@@ -356,7 +346,7 @@ def process_batch_serial(adapter, pipeline, tasks, output_root, save_vis, retry_
 
 
 def process_batch_parallel(config_path, tasks, output_root,
-                           save_vis, use_gpu, workers, retry_failed=False):
+                           save_vis, workers, retry_failed=False):
     """多进程并发处理 batch 任务。"""
     success = 0
     failed = 0
@@ -374,7 +364,6 @@ def process_batch_parallel(config_path, tasks, output_root,
                 frame_id,
                 output_root,
                 save_vis,
-                use_gpu,
             ): (scene_path, frame_id)
             for scene_path, frame_id in tasks
         }
@@ -418,8 +407,6 @@ def main():
                         help="Batch process all scenes")
     parser.add_argument("--output", type=str, default=None,
                         help="Output root directory")
-    parser.add_argument("--gpu", action="store_true",
-                        help="Enable GPU acceleration")
     parser.add_argument("--no-vis", action="store_true",
                         help="Skip visualization")
     parser.add_argument("--workers", type=int, default=1,
@@ -469,10 +456,8 @@ def main():
     adapter = build_adapter(cfg)
     placement_cfg = build_placement_config(cfg)
 
-    use_gpu = args.gpu or cfg.get("compute", {}).get("use_gpu", False)
     save_vis = not args.no_vis and cfg.get("visualization", {}).get("save_vis", True)
 
-    pipeline = PlacementPipeline(config=placement_cfg, use_gpu=use_gpu)
 
     output_root = args.output or cfg.get("output", {}).get("dir", "outputs/placement")
 
@@ -523,12 +508,6 @@ def main():
             f"Found {len(scenes)} scenes and {len(tasks)} frames to process "
             f"with {workers} worker(s)."
         )
-        if use_gpu and workers > 1:
-            print(
-                "[WARN] Running multiple GPU workers may cause GPU memory "
-                "contention or reduced throughput."
-            )
-
         if workers == 1:
             success, failed = process_batch_serial(
                 adapter=adapter,
@@ -544,7 +523,6 @@ def main():
                 tasks=tasks,
                 output_root=output_root,
                 save_vis=save_vis,
-                use_gpu=use_gpu,
                 workers=workers,
                 retry_failed=args.retry_failed,
             )

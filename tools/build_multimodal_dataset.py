@@ -17,8 +17,7 @@ tools/build_multimodal_dataset.py
 
 作用:
     - 对齐 RGB、文本、点云、placement sample
-    - 从原始数据集读取每帧相机参数
-    - 基于点云和相机外参预计算 box_norm_meta
+    - 从 placement grid_meta 读取每帧相机参数
     - 按 source_name 分层随机切分 train/valid/test
 
 输入:
@@ -47,16 +46,14 @@ tools/build_multimodal_dataset.py
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import random
 import sys
+from collections.abc import Mapping as MappingABC
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Mapping, Tuple
 
 import numpy as np
-import yaml
-from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -65,13 +62,11 @@ from src.annotation.bbox3d.bbox_utils import get_bbox_corners
 from src.utils.coord_utils import rotation_z_3x3, transform_points
 
 SCHEMA_VERSION = "placement_multimodal_dataset/v1"
-DEFAULT_CONFIGS = {
-    "hope": PROJECT_ROOT / "configs/annotation/placement.yaml",
-    "housecat6d": PROJECT_ROOT / "configs/annotation/placement_housecat6d.yaml",
-    "ycbv_test": PROJECT_ROOT / "configs/annotation/placement_ycbv_test.yaml",
-    "scannet": PROJECT_ROOT / "configs/annotation/placement_scannet.yaml",
-    "dopose": PROJECT_ROOT / "configs/annotation/placement_dopose.yaml",
-}
+CAMERA_REQUIRED_KEYS = ("fx", "fy", "cx", "cy", "img_w", "img_h", "E_c2w")
+CAMERA_BACKFILL_HINT = (
+    "请先运行 tools/backfill_placement_camera_meta.py 回填旧 placement 输出，"
+    "或重新运行 tools/run_placement.py 生成带 camera 的 grid_meta。"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -126,100 +121,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="随机种子，默认 42",
     )
     return parser
-
-
-def load_yaml_config(config_path: Path) -> dict:
-    """
-    用法: cfg = load_yaml_config(Path("configs/annotation/placement.yaml"))
-    作用: 读取 YAML 配置文件
-    输入: config_path: Path，配置文件路径
-    输出: dict，配置内容
-    """
-    with config_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def build_adapter(cfg: dict):
-    """
-    用法: adapter = build_adapter(cfg)
-    作用: 根据配置创建数据集适配器
-    输入: cfg: dict，YAML 配置内容
-    输出: DatasetAdapter，对应数据集适配器实例
-    """
-    ds_cfg = cfg.get("dataset", {})
-    ds_type = ds_cfg.get("type")
-
-    if ds_type == "hope":
-        from src.datasets.hope_adapter import HopeAdapter
-
-        return HopeAdapter(
-            root_dir=ds_cfg["root_dir"],
-            mesh_dir=ds_cfg.get("mesh_dir"),
-            frame_step=ds_cfg.get("frame_step", 60),
-        )
-
-    if ds_type == "housecat6d":
-        from src.datasets.housecat6d_adapter import HouseCat6DAdapter
-
-        return HouseCat6DAdapter(
-            root_dir=ds_cfg["root_dir"],
-            frame_step=ds_cfg.get("frame_step", 60),
-        )
-
-    if ds_type == "ycb_video":
-        from src.datasets.ycb_video_adapter import YCBVideoAdapter
-
-        return YCBVideoAdapter(
-            root_dir=ds_cfg["root_dir"],
-            models_info_path=ds_cfg["models_info_path"],
-            frame_step=ds_cfg.get("frame_step", 5),
-            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
-        )
-
-    if ds_type == "scannet":
-        from src.datasets.scannet_adapter import ScanNetAdapter
-
-        return ScanNetAdapter(
-            root_dir=ds_cfg["root_dir"],
-            frame_step=ds_cfg.get("frame_step", 100),
-            instance_dir_name=ds_cfg.get("instance_dir_name", "2d-instance"),
-            min_visible_pixels=ds_cfg.get("min_visible_pixels", 1),
-            excluded_labels=ds_cfg.get("excluded_labels"),
-        )
-
-    if ds_type == "dopose":
-        from src.datasets.dopose_adapter import DoPoseAdapter
-
-        return DoPoseAdapter(
-            root_dir=ds_cfg["root_dir"],
-            models_info_path=ds_cfg["models_info_path"],
-            models_names_path=ds_cfg.get("models_names_path"),
-            subsets=ds_cfg.get("subsets"),
-            frame_step=ds_cfg.get("frame_step", 1),
-            min_visib_fract=ds_cfg.get("min_visib_fract", 0.0),
-        )
-
-    raise ValueError(f"Unsupported dataset type: {ds_type}")
-
-
-def build_source_configs(source_names: Iterable[str]) -> Dict[str, dict]:
-    """
-    用法: cfgs = build_source_configs(["hope", "housecat6d"])
-    作用: 为每个 source_name 读取对应的数据集配置
-    输入: source_names: Iterable[str]，来源名称序列
-    输出: dict，source_name -> 配置字典
-    """
-    configs: Dict[str, dict] = {}
-    for source_name in sorted(set(source_names)):
-        config_path = DEFAULT_CONFIGS.get(source_name)
-        if config_path is None and "scannet" in source_name.lower():
-            config_path = DEFAULT_CONFIGS["scannet"]
-        if config_path is None and "dopose" in source_name.lower():
-            config_path = DEFAULT_CONFIGS["dopose"]
-        if config_path is None:
-            raise KeyError(f"No dataset config mapping for source: {source_name}")
-        configs[source_name] = load_yaml_config(config_path)
-    return configs
 
 
 def load_json(json_path: Path):
@@ -303,68 +204,61 @@ def iter_sample_records(sample_dir: Path) -> Iterator[Tuple[Path, dict]]:
             yield sample_json, record
 
 
-def read_ascii_ply_points(ply_path: Path) -> np.ndarray:
+def validate_camera_record(camera: object, grid_meta_path: Path) -> dict:
     """
-    用法: points = read_ascii_ply_points(Path("outputs/hope/point_clouds/scene_0000_0000.ply"))
-    作用: 读取 ASCII PLY 点云中的 xyz 坐标
-    输入: ply_path: Path，PLY 文件路径
-    输出: ndarray(N, 3)，点云坐标
+    用法: camera = validate_camera_record(payload["camera"], grid_meta_path)
+    作用: 校验并标准化 grid_meta 中的相机字段
+    输入: camera: JSON 对象；grid_meta_path: Path，用于错误定位
+    输出: dict，可直接写入多模态标注的相机字段
     """
-    with ply_path.open("r", encoding="utf-8") as f:
-        lines = f.readlines()
+    if not isinstance(camera, MappingABC):
+        raise ValueError(
+            f"Invalid camera in grid_meta: {grid_meta_path}. "
+            f"camera must be an object. {CAMERA_BACKFILL_HINT}"
+        )
 
-    end_header_idx = None
-    for idx, line in enumerate(lines):
-        if line.strip() == "end_header":
-            end_header_idx = idx
-            break
-    if end_header_idx is None:
-        raise ValueError(f"PLY header missing end_header: {ply_path}")
+    missing_keys = [key for key in CAMERA_REQUIRED_KEYS if key not in camera]
+    if missing_keys:
+        raise ValueError(
+            f"Missing camera keys {missing_keys} in grid_meta: {grid_meta_path}. "
+            f"{CAMERA_BACKFILL_HINT}"
+        )
 
-    payload = "".join(lines[end_header_idx + 1 :]).strip()
-    if not payload:
-        raise ValueError(f"PLY contains no vertex payload: {ply_path}")
+    try:
+        e_c2w = np.asarray(camera["E_c2w"], dtype=np.float64)
+        normalized = {
+            "fx": float(camera["fx"]),
+            "fy": float(camera["fy"]),
+            "cx": float(camera["cx"]),
+            "cy": float(camera["cy"]),
+            "img_w": int(camera["img_w"]),
+            "img_h": int(camera["img_h"]),
+            "E_c2w": e_c2w.tolist(),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid camera values in grid_meta: {grid_meta_path}") from exc
 
-    points = np.loadtxt(io.StringIO(payload), usecols=(0, 1, 2), dtype=np.float64)
-    if points.ndim == 1:
-        points = points.reshape(1, 3)
-    return points
+    if e_c2w.shape != (4, 4):
+        raise ValueError(
+            f"camera.E_c2w must have shape (4, 4) in grid_meta: {grid_meta_path}, "
+            f"got {e_c2w.shape}"
+        )
+    if normalized["img_w"] <= 0 or normalized["img_h"] <= 0:
+        raise ValueError(f"camera image size must be positive in grid_meta: {grid_meta_path}")
+    return normalized
 
 
-def get_scene_path(dataset_root: Path, scene_id: str) -> Path:
+def load_camera_from_grid_meta(grid_meta_path: Path) -> dict:
     """
-    用法: scene_path = get_scene_path(Path("/data/hope"), "scene_0000")
-    作用: 根据 scene_id 构造原始数据集中的场景路径
-    输入: dataset_root: Path；scene_id: str
-    输出: Path，场景目录路径
+    用法: camera = load_camera_from_grid_meta(Path("outputs/hope/grid_meta/scene_0000_0000.json"))
+    作用: 从 placement grid_meta 中读取相机参数
+    输入: grid_meta_path: Path，placement 每帧 grid_meta 文件
+    输出: dict，标准化后的相机字段
     """
-    return dataset_root / scene_id
-
-
-def make_camera_serializable(
-    fx: float,
-    fy: float,
-    cx: float,
-    cy: float,
-    img_w: int,
-    img_h: int,
-    e_c2w: np.ndarray,
-) -> dict:
-    """
-    用法: camera_dict = make_camera_serializable(100.0, 101.0, 32.0, 24.0, 64, 48, np.eye(4))
-    作用: 将相机字段转为可写入 JSON 的字典
-    输入: fx/fy/cx/cy: float；img_w/img_h: int；e_c2w: ndarray(4,4)
-    输出: dict，可序列化相机字段
-    """
-    return {
-        "fx": float(fx),
-        "fy": float(fy),
-        "cx": float(cx),
-        "cy": float(cy),
-        "img_w": int(img_w),
-        "img_h": int(img_h),
-        "E_c2w": np.asarray(e_c2w, dtype=np.float64).tolist(),
-    }
+    payload = load_json(grid_meta_path)
+    if "camera" not in payload:
+        raise ValueError(f"Missing camera in grid_meta: {grid_meta_path}. {CAMERA_BACKFILL_HINT}")
+    return validate_camera_record(payload["camera"], grid_meta_path)
 
 
 def build_frame_lookup(
@@ -421,156 +315,41 @@ def build_frame_lookup(
     return frame_lookup
 
 
-def load_camera_for_frame(source_name: str, source_cfg: Mapping[str, object], scene_id: str, frame_id: str) -> dict:
-    """
-    用法: camera_dict = load_camera_for_frame("hope", cfg, "scene_0000", "0000")
-    作用: 从原始数据集最小化读取单帧相机参数
-    输入: source_name: str；source_cfg: 配置字典；scene_id/frame_id: str
-    输出: dict，可序列化相机字段
-    """
-    dataset_cfg = source_cfg.get("dataset", {})
-    dataset_root = Path(str(dataset_cfg["root_dir"]))
-    scene_path = get_scene_path(dataset_root, scene_id)
-
-    if source_name == "hope":
-        annot_path = scene_path / f"{frame_id}.json"
-        rgb_path = scene_path / f"{frame_id}_rgb.jpg"
-        annot = load_json(annot_path)
-        intrinsics = np.asarray(annot["camera"]["intrinsics"], dtype=np.float64)
-        e_w2c = np.asarray(annot["camera"]["extrinsics"], dtype=np.float64)
-        e_w2c[:3, 3] *= 100.0
-        e_c2w = np.linalg.inv(e_w2c)
-        img_w, img_h = Image.open(rgb_path).size
-        return make_camera_serializable(
-            fx=intrinsics[0, 0],
-            fy=intrinsics[1, 1],
-            cx=intrinsics[0, 2],
-            cy=intrinsics[1, 2],
-            img_w=img_w,
-            img_h=img_h,
-            e_c2w=e_c2w,
-        )
-
-    if source_name == "housecat6d":
-        intrinsics_path = scene_path / "intrinsics.txt"
-        camera_pose_path = scene_path / "camera_pose" / f"{frame_id}.txt"
-        rgb_path = scene_path / "rgb" / f"{frame_id}.png"
-        intrinsics = np.loadtxt(intrinsics_path, dtype=np.float64).reshape(3, 3)
-        e_c2w = np.loadtxt(camera_pose_path, dtype=np.float64).reshape(4, 4)
-        e_c2w[:3, 3] *= 100.0
-        img_w, img_h = Image.open(rgb_path).size
-        return make_camera_serializable(
-            fx=intrinsics[0, 0],
-            fy=intrinsics[1, 1],
-            cx=intrinsics[0, 2],
-            cy=intrinsics[1, 2],
-            img_w=img_w,
-            img_h=img_h,
-            e_c2w=e_c2w,
-        )
-
-    if source_name == "ycbv_test":
-        camera_path = scene_path / "scene_camera.json"
-        rgb_path = scene_path / "rgb" / f"{frame_id}.png"
-        camera_records = load_json(camera_path)
-        camera_record = camera_records[str(int(frame_id))]
-        intrinsics = np.asarray(camera_record["cam_K"], dtype=np.float64).reshape(3, 3)
-        e_w2c = np.eye(4, dtype=np.float64)
-        e_w2c[:3, :3] = np.asarray(
-            camera_record["cam_R_w2c"], dtype=np.float64
-        ).reshape(3, 3)
-        e_w2c[:3, 3] = np.asarray(
-            camera_record["cam_t_w2c"], dtype=np.float64
-        ) * 0.1
-        e_c2w = np.linalg.inv(e_w2c)
-        img_w, img_h = Image.open(rgb_path).size
-        return make_camera_serializable(
-            fx=intrinsics[0, 0],
-            fy=intrinsics[1, 1],
-            cx=intrinsics[0, 2],
-            cy=intrinsics[1, 2],
-            img_w=img_w,
-            img_h=img_h,
-            e_c2w=e_c2w,
-        )
-
-    if "scannet" in source_name.lower():
-        intrinsic_path = scene_path / "intrinsic" / "intrinsic_depth.txt"
-        pose_path = scene_path / "pose" / f"{frame_id}.txt"
-        depth_path = scene_path / "depth" / f"{frame_id}.png"
-        intrinsics = np.loadtxt(intrinsic_path, dtype=np.float64).reshape(4, 4)[:3, :3]
-        e_c2w = np.loadtxt(pose_path, dtype=np.float64).reshape(4, 4)
-        e_c2w[:3, 3] *= 100.0
-        img_w, img_h = Image.open(depth_path).size
-        return make_camera_serializable(
-            fx=intrinsics[0, 0],
-            fy=intrinsics[1, 1],
-            cx=intrinsics[0, 2],
-            cy=intrinsics[1, 2],
-            img_w=img_w,
-            img_h=img_h,
-            e_c2w=e_c2w,
-        )
-
-    if "dopose" in source_name.lower():
-        from src.datasets.dopose_adapter import DoPoseAdapter
-
-        adapter = DoPoseAdapter(
-            root_dir=dataset_cfg["root_dir"],
-            models_info_path=dataset_cfg["models_info_path"],
-            models_names_path=dataset_cfg.get("models_names_path"),
-            subsets=dataset_cfg.get("subsets"),
-            frame_step=dataset_cfg.get("frame_step", 1),
-            min_visib_fract=dataset_cfg.get("min_visib_fract", 0.0),
-        )
-        scene = adapter.load_scene(str(scene_path), frame_id)
-        return make_camera_serializable(
-            fx=scene.camera.fx,
-            fy=scene.camera.fy,
-            cx=scene.camera.cx,
-            cy=scene.camera.cy,
-            img_w=scene.camera.img_w,
-            img_h=scene.camera.img_h,
-            e_c2w=scene.camera.E_c2w,
-        )
-
-    raise ValueError(f"Unsupported source_name: {source_name}")
-
-
 def enrich_records_with_frame_meta(
     frame_lookup: Mapping[Tuple[str, str, str], List[dict]],
-    source_configs: Mapping[str, dict],
     rgb_dir: Path,
 ) -> List[dict]:
     """
-    用法: records = enrich_records_with_frame_meta(frame_lookup, source_configs, rgb_dir)
-    作用: 为每条样本补齐相机参数和 box_norm_meta
-    输入: frame_lookup: 按帧分组的样本；source_configs: 来源配置映射；rgb_dir: RGB 目录
+    用法: records = enrich_records_with_frame_meta(frame_lookup, rgb_dir)
+    作用: 为每条样本补齐 placement grid_meta 中的相机参数
+    输入: frame_lookup: 按帧分组的样本；rgb_dir: RGB 目录
     输出: list[dict]，完整样本列表
     """
     enriched_records: List[dict] = []
     for frame_key in sorted(frame_lookup):
-        source_name, scene_id, frame_id = frame_key
         sample_group = frame_lookup[frame_key]
         point_cloud_rel = sample_group[0]["point_cloud_path"]
         point_cloud_path = PROJECT_ROOT / point_cloud_rel
-        camera_dict = load_camera_for_frame(
-            source_name=source_name,
-            source_cfg=source_configs[source_name],
-            scene_id=scene_id,
-            frame_id=frame_id,
-        )
+        grid_meta_path = PROJECT_ROOT / sample_group[0]["grid_meta_path"]
+
+        frame_required_paths = {
+            "point_cloud": point_cloud_path,
+            "grid_meta": grid_meta_path,
+        }
+        for key, path in frame_required_paths.items():
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Missing {key} file for frame {frame_key}: {path}"
+                )
+        camera_dict = load_camera_from_grid_meta(grid_meta_path)
 
         for item in sample_group:
             rgb_path = rgb_dir / item["image_filename"]
-            grid_meta_path = PROJECT_ROOT / item["grid_meta_path"]
             sample_json_path = PROJECT_ROOT / item["sample_json_path"]
             label_record = item["label_record"]
 
             required_paths = {
                 "rgb": rgb_path,
-                "point_cloud": point_cloud_path,
-                "grid_meta": grid_meta_path,
                 "sample_json": sample_json_path,
             }
             for key, path in required_paths.items():
@@ -818,10 +597,8 @@ def build_multimodal_dataset(
         label_lookup=label_lookup,
         available_rgb_filenames=available_rgb_filenames,
     )
-    source_configs = build_source_configs(source_name for source_name, _, _ in frame_lookup.keys())
     all_records = enrich_records_with_frame_meta(
         frame_lookup=frame_lookup,
-        source_configs=source_configs,
         rgb_dir=rgb_dir,
     )
     train_records, valid_records, test_records = stratified_split_by_source(

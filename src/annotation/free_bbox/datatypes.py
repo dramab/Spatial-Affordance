@@ -10,7 +10,7 @@ src/annotation/free_bbox/datatypes.py
     from src.annotation.free_bbox.datatypes import SceneData, CameraParams, ObjectInfo, PlacementConfig
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 
@@ -113,8 +113,6 @@ class PlacementConfig:
         occlusion_threshold: 遮挡阈值（OBB 角点被遮挡的比例上限）
         dbscan_eps: DBSCAN 聚类半径（None 表示按物体尺度自适应估计）
         dbscan_min_samples: DBSCAN 最小样本数
-        world_up: 世界坐标系上方向 (3,)
-        vis_margin_px: 可视化边距（像素）
     """
     voxel_size: float = 1.0
     pixel_stride: int = 4
@@ -126,8 +124,6 @@ class PlacementConfig:
     occlusion_threshold: float = 0.3
     dbscan_eps: Optional[float] = None
     dbscan_min_samples: int = 1
-    world_up: tuple = (0.0, 0.0, 1.0)
-    vis_margin_px: int = 30
     stability_chunk_size: int = 2000
     preserve_orientation: bool = True
     orientation_threshold_deg: float = 15.0
@@ -141,7 +137,7 @@ class PlacementResult:
     属性:
         obj_id: 物体标识
         class_name: 类别名
-        original_aabb_world: (6,) 原始位置的世界坐标 AABB
+        original_aabb_world: (6,) 物体在原始输入姿态下的世界坐标 AABB，即放置规划前的位置包围盒
         placements: 放置样本列表，每个元素为 dict:
             {
                 "sample_id": str,
@@ -149,7 +145,7 @@ class PlacementResult:
                 "center_world": [x, y, z],
                 "yaw_degrees": float,
                 "transform_world": (4,4) list,
-                "aabb_world": [min_x, min_y, min_z, max_x, max_y, max_z],
+                "aabb_world": [min_x, min_y, min_z, max_x, max_y, max_z],  // 放置规划后新姿态下的世界坐标 AABB
                 "free_space_score": int,
             }
         num_raw_candidates: 过滤前的候选总数
