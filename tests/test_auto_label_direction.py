@@ -9,8 +9,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.annotation.free_bbox.grid_ops import _get_bbox_corners
+from src.annotation.free_bbox.datatypes import ObjectInfo
 from src.utils.coord_utils import transform_points
 from tools.auto_label import (
+    build_spatial_relation_record,
     describe_angle_relation,
     describe_horizontal_relation_by_depth,
     describe_horizontal_relation_by_pixel_angle,
@@ -62,6 +64,31 @@ def make_camera():
         dtype=np.float64,
     )
     return E_w2c, K
+
+
+def test_build_spatial_relation_record_preserves_reference_identity():
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证结构化空间关系记录会保留参照物 ID、类别和展示名。
+    输入: 测试用 ObjectInfo 和 mapping。
+    输出: 断言结构化字段完整。
+    """
+    ref = ObjectInfo(
+        obj_id="obj_1",
+        class_name="raw_class",
+        bbox3d_canonical=np.array([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float64),
+        pose_world=np.eye(4, dtype=np.float64),
+    )
+
+    record = build_spatial_relation_record(ref, "the right of", 12.5, {"raw_class": "Pretty Object"})
+
+    assert record == {
+        "relation": "the right of",
+        "reference_object_id": "obj_1",
+        "reference_class_name": "raw_class",
+        "reference_name": "Pretty Object",
+        "distance_cm": 12.5,
+    }
 
 
 @pytest.mark.parametrize(

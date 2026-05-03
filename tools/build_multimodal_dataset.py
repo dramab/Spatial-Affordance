@@ -582,16 +582,27 @@ def enrich_records_with_frame_meta(
             if not raw_label:
                 raise ValueError(f"Empty label for sample: {item['sample_id']}")
 
-            enriched_records.append({
+            placement_record = item["placement"]
+            enriched_record = {
                 "sample_id": item["sample_id"],
                 "source_name": item["source_name"],
+                "scene_id": item["scene_id"],
+                "frame_id": item["frame_id"],
                 "rgb_path": to_repo_relative(rgb_path),
                 "point_cloud_path": item["point_cloud_path"],
                 "prompt": raw_label,
                 "polished_prompt": polished_label,
-                "placement": build_minimal_placement(item["placement"]),
+                "placement": build_minimal_placement(placement_record),
                 "camera": camera_dict,
-            })
+            }
+            if placement_record.get("object_id") is not None:
+                enriched_record["object_id"] = str(placement_record["object_id"])
+            if placement_record.get("class_name") is not None:
+                enriched_record["class_name"] = str(placement_record["class_name"])
+            spatial_relation = label_record.get("spatial_relation")
+            if isinstance(spatial_relation, dict):
+                enriched_record["spatial_relation"] = spatial_relation
+            enriched_records.append(enriched_record)
     return enriched_records
 
 

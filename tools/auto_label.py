@@ -783,6 +783,61 @@ def find_nearest_reference(
 
     return all_candidates or [(None, "near", float('inf'))]
 
+
+def build_spatial_relation_record(
+    ref: Optional[ObjectInfo],
+    relation: str,
+    distance_cm: float,
+    mapping_data: dict = None,
+) -> dict:
+    """
+    用法: record = build_spatial_relation_record(ref, "the right of", 12.0, mapping_data)
+    作用: 将 auto_label 的参照物候选转换为可保存、可评测的结构化关系记录。
+    输入: ref 为参照物 ObjectInfo 或 None；relation 为空间关系；distance_cm 为候选距离；mapping_data 为类别映射表。
+    输出: dict，包含 relation、reference_object_id、reference_class_name、reference_name、distance_cm。
+    """
+    if mapping_data is None:
+        mapping_data = {}
+    if ref is None:
+        return {
+            "relation": str(relation),
+            "reference_object_id": None,
+            "reference_class_name": None,
+            "reference_name": "nothing",
+            "distance_cm": None if not np.isfinite(distance_cm) else float(distance_cm),
+        }
+    return {
+        "relation": str(relation),
+        "reference_object_id": str(ref.obj_id),
+        "reference_class_name": str(ref.class_name),
+        "reference_name": mapping_data.get(ref.class_name, ref.class_name),
+        "distance_cm": None if not np.isfinite(distance_cm) else float(distance_cm),
+    }
+
+
+def calculate_spatial_relation_records(
+    target_corners_world: np.ndarray,
+    reference_objects: List[ObjectInfo],
+    camera: CameraParams,
+    exclude_id: str = None,
+    mapping_data: dict = None,
+) -> List[dict]:
+    """
+    用法: records = calculate_spatial_relation_records(corners, refs, camera, exclude_id, mapping_data)
+    作用: 计算目标 box 与候选参照物的结构化空间关系记录。
+    输入: 目标 world box 角点、参照物列表、相机参数、可选排除 obj_id 和类别映射表。
+    输出: list[dict]，每项包含 relation、reference_object_id、reference_name、distance_cm。
+    """
+    if mapping_data is None:
+        mapping_data = {}
+    all_candidates = find_nearest_reference(
+        target_corners_world, reference_objects, camera, exclude_id
+    )
+    return [
+        build_spatial_relation_record(ref, relation, distance, mapping_data)
+        for ref, relation, distance in all_candidates
+    ]
+
 def calculate_spatial_relation(
     target_corners_world: np.ndarray,
     reference_objects: List[ObjectInfo],
@@ -796,35 +851,32 @@ def calculate_spatial_relation(
     输入: 目标 world box 角点、参照物列表、相机参数、可选排除 obj_id 和类别映射表。
     输出: list[(relation, ref_name)]，用于填充自动标注模板。
     """
-    all_candidates = find_nearest_reference(
-        target_corners_world, reference_objects, camera, exclude_id
+    relation_records = calculate_spatial_relation_records(
+        target_corners_world,
+        reference_objects,
+        camera,
+        exclude_id=exclude_id,
+        mapping_data=mapping_data,
     )
+    return [
+        (record["relation"], record["reference_name"])
+        for record in relation_records
+    ]
 
-    if mapping_data is None:
-        mapping_data = {}
-    result = []
-    for ref, relation, _ in all_candidates:
-        if ref is None:
-            result.append(("nowhere", "nothing"))
-        else:
-            ref_name = mapping_data.get(ref.class_name, ref.class_name)
-            result.append((relation, ref_name))
-
-    return result
 
 # ===================== 3. 标注生成函数 =====================
-def generate_label(
+def generate_label_with_spatial_relation(
     sample_record: dict,
     scene_data: SceneData,
     reference_objects: List[ObjectInfo],
     target_object_name: str,
     mapping_data: dict,
-) -> str:
+) -> Tuple[str, dict]:
     """
-    用法: label = generate_label(sample_record, scene_data, reference_objects, target_object_name, mapping_data)
-    作用: 生成单个 placement sample 的自然语言移动指令。
+    用法: label, spatial = generate_label_with_spatial_relation(sample_record, scene_data, reference_objects, target_object_name, mapping_data)
+    作用: 生成单个 placement sample 的自然语言移动指令，并返回结构化空间关系。
     输入: sample 记录、场景数据、参照物列表、目标物体展示名和类别映射表。
-    输出: str，完整自然语言标注。
+    输出: tuple，分别为完整自然语言标注和结构化 spatial_relation 字典。
     """
     canonical_aabb = np.asarray(sample_record["canonical_aabb_object"], dtype=np.float64)
     canonical_corners = _get_bbox_corners(canonical_aabb)
@@ -840,43 +892,91 @@ def generate_label(
         target_obj_id = sample_record.get('sample_id').split('_')[2]
 
     # 1. 先正常计算原始位置的描述
-    original_relations = calculate_spatial_relation(
+    original_relation_records = calculate_spatial_relation_records(
         original_corners, reference_objects, scene_data.camera, exclude_id=target_obj_id, mapping_data=mapping_data
     )
-    rel_original, ref_a_name = original_relations[0] if original_relations else ("near", "the reference object")
+    original_record = original_relation_records[0] if original_relation_records else {
+        "relation": "near",
+        "reference_object_id": None,
+        "reference_class_name": None,
+        "reference_name": "the reference object",
+        "distance_cm": None,
+    }
+    rel_original = original_record["relation"]
+    ref_a_name = original_record["reference_name"]
 
     # 2. 计算目标位置的描述
-    placement_relations = calculate_spatial_relation(
+    placement_relation_records = calculate_spatial_relation_records(
         placement_corners, reference_objects, scene_data.camera, exclude_id=None, mapping_data=mapping_data
     )
-    rel_placement, ref_b_name = placement_relations[0] if placement_relations else ("near", "the reference object")
+    placement_record = placement_relation_records[0] if placement_relation_records else {
+        "relation": "near",
+        "reference_object_id": None,
+        "reference_class_name": None,
+        "reference_name": "the reference object",
+        "distance_cm": None,
+    }
+    rel_placement = placement_record["relation"]
+    ref_b_name = placement_record["reference_name"]
 
     # 【关键修复】只有当「参照物相同 AND 方位也相同」时，才强制换一个
     if (ref_b_name == ref_a_name) and (rel_placement == rel_original):
         # 找到 ref_a 对应的 object_id
-        ref_a_id = None
-        for obj in reference_objects:
-            if mapping_data.get(obj.class_name, obj.class_name) == ref_a_name:
-                ref_a_id = obj.obj_id
-                break
+        ref_a_id = original_record.get("reference_object_id")
+        if ref_a_id is None:
+            for obj in reference_objects:
+                if mapping_data.get(obj.class_name, obj.class_name) == ref_a_name:
+                    ref_a_id = obj.obj_id
+                    break
 
         # 把 ref_a 从候选列表里拿掉，重新选一个
         if ref_a_id is not None:
-            filtered_refs = [obj for obj in reference_objects if obj.obj_id != ref_a_id]
+            filtered_refs = [obj for obj in reference_objects if str(obj.obj_id) != str(ref_a_id)]
             if filtered_refs:
-                new_placement_relations = calculate_spatial_relation(
+                new_placement_relation_records = calculate_spatial_relation_records(
                     placement_corners, filtered_refs, scene_data.camera, exclude_id=target_obj_id, mapping_data=mapping_data
                 )
                 # 再次保护：确保新列表有值
-                rel_placement, ref_b_name = new_placement_relations[0] if new_placement_relations else (rel_placement, ref_b_name)
+                if new_placement_relation_records:
+                    placement_relation_records = new_placement_relation_records
+                    placement_record = placement_relation_records[0]
+                    rel_placement = placement_record["relation"]
+                    ref_b_name = placement_record["reference_name"]
 
-    return LABEL_TEMPLATE.format(
+    label = LABEL_TEMPLATE.format(
         object_name=target_object_name,
         rel_original=rel_original,
         ref_a_name=ref_a_name,
         rel_placement=rel_placement,
         ref_b_name=ref_b_name,
     )
+    return label, {
+        "original": original_record,
+        "placement": placement_record,
+    }
+
+
+def generate_label(
+    sample_record: dict,
+    scene_data: SceneData,
+    reference_objects: List[ObjectInfo],
+    target_object_name: str,
+    mapping_data: dict,
+) -> str:
+    """
+    用法: label = generate_label(sample_record, scene_data, reference_objects, target_object_name, mapping_data)
+    作用: 生成单个 placement sample 的自然语言移动指令。
+    输入: sample 记录、场景数据、参照物列表、目标物体展示名和类别映射表。
+    输出: str，完整自然语言标注。
+    """
+    label, _ = generate_label_with_spatial_relation(
+        sample_record=sample_record,
+        scene_data=scene_data,
+        reference_objects=reference_objects,
+        target_object_name=target_object_name,
+        mapping_data=mapping_data,
+    )
+    return label
 
 
 # ===================== 4. 基于图片的遍历处理逻辑 =====================
@@ -1140,7 +1240,13 @@ def build_label_record(
     )
     target_object_name, is_found_target = get_target_object_name(sample_record, source_dir, mapping_data)
     reference_objects, _ = get_reference_objects_with_names(scene, mapping_data)
-    label = generate_label(sample_record, scene, reference_objects, target_object_name, mapping_data)
+    label, spatial_relation = generate_label_with_spatial_relation(
+        sample_record=sample_record,
+        scene_data=scene,
+        reference_objects=reference_objects,
+        target_object_name=target_object_name,
+        mapping_data=mapping_data,
+    )
     return {
         "image_filename": img_file.name,
         "sample_id": sample_id,
@@ -1148,6 +1254,7 @@ def build_label_record(
         "target_object_name": target_object_name,
         "is_found_target": is_found_target,
         "label": label,
+        "spatial_relation": spatial_relation,
     }
 
 def save_all_labels(output_dir: Path, all_labels: List[dict]) -> Path:

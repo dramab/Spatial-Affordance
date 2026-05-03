@@ -226,6 +226,8 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "sample_id": "scene_0000_0000_obj_0_p000",
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
+                    "object_id": "obj_0",
+                    "class_name": "demo_class",
                     "canonical_aabb_object": [-1, -2, -3, 1, 2, 3],
                     "transform_world": _make_yaw_transform((0, 0, 0), 15.0),
                     "center_world": [0, 0, 0],
@@ -283,6 +285,15 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                 "is_found_target": True,
                 "label": "raw hope 0",
                 "polished_label": "polished hope 0",
+                "spatial_relation": {
+                    "placement": {
+                        "relation": "the right of",
+                        "reference_object_id": "obj_1",
+                        "reference_class_name": "ref_class",
+                        "reference_name": "Reference",
+                        "distance_cm": 10.0,
+                    }
+                },
             },
             {
                 "image_filename": "hope__scene_0000_0000_obj_1_p000.png",
@@ -353,16 +364,18 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
     assert test_payload["schema_version"] == build_multimodal_dataset.SCHEMA_VERSION
 
     sample = train_payload["samples"][0]
-    assert sorted(sample.keys()) == [
+    assert {
         "camera",
+        "frame_id",
         "placement",
         "point_cloud_path",
         "polished_prompt",
         "prompt",
         "rgb_path",
         "sample_id",
+        "scene_id",
         "source_name",
-    ]
+    }.issubset(sample.keys())
     assert sample["prompt"].startswith("raw")
     assert sample["polished_prompt"].startswith("polished")
     assert sample["camera"]["img_w"] == 64
@@ -381,6 +394,9 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
         [2.0, 4.0, 6.0],
         atol=1e-6,
     )
+    assert samples_by_id["scene_0000_0000_obj_0_p000"]["object_id"] == "obj_0"
+    assert samples_by_id["scene_0000_0000_obj_0_p000"]["class_name"] == "demo_class"
+    assert samples_by_id["scene_0000_0000_obj_0_p000"]["spatial_relation"]["placement"]["relation"] == "the right of"
     assert np.allclose(
         samples_by_id["scene01_000000_obj_2_p000"]["placement"]["target_box"][3:6],
         [2.0, 4.0, 4.0],
