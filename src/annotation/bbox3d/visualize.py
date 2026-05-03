@@ -80,7 +80,7 @@ def visualize_bbox3d_on_image(rgb, objects, camera, E_w2c,
                     color=color, linewidth=1.5, alpha=0.9)
 
         # 接触面高亮
-        contact_idx = get_contact_face_indices(obj.pose_world, E_w2c, world_up)
+        contact_idx = get_contact_face_indices(obj.pose_world, world_up)
         contact_2d = corners_2d[contact_idx]
         poly = Polygon(contact_2d, closed=True,
                        facecolor=BOTTOM_COLOR, edgecolor=BOTTOM_COLOR,
