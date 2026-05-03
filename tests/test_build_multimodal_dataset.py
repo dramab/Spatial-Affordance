@@ -12,6 +12,8 @@ tests/test_build_multimodal_dataset.py
   验证缺失 polished_label 时会写入空字符串
 - test_build_frame_lookup_ignores_samples_without_rgb_before_label_check：
   验证无 RGB 的样本不会要求存在文本标签
+- test_build_dataset_raises_on_missing_grid_meta_camera：
+  验证旧 placement 输出缺少 grid_meta.camera 时会抛出明确错误
 
 用法：
     pytest tests/test_build_multimodal_dataset.py -v
@@ -215,8 +217,14 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
         house_dir / "point_clouds/scene01_000000.ply",
         np.array([[-1.0, 1.0, 5.0], [3.0, 5.0, 9.0]], dtype=np.float64),
     )
-    _write_json(hope_dir / "grid_meta/scene_0000_0000.json", {"ok": True})
-    _write_json(house_dir / "grid_meta/scene01_000000.json", {"ok": True})
+    _write_json(
+        hope_dir / "grid_meta/scene_0000_0000.json",
+        {"ok": True, "camera": _make_fake_camera_dict(100.0)},
+    )
+    _write_json(
+        house_dir / "grid_meta/scene01_000000.json",
+        {"ok": True, "camera": _make_fake_camera_dict(200.0)},
+    )
 
     _write_json(
         hope_dir / "samples/scene_0000_0000.json",
@@ -314,19 +322,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
         ],
     )
 
-    def _fake_load_camera_for_frame(source_name, source_cfg, scene_id, frame_id):
-        del source_name, source_cfg, scene_id
-        if frame_id == "0000":
-            return _make_fake_camera_dict(100.0)
-        return _make_fake_camera_dict(200.0)
-
     monkeypatch.setattr(build_multimodal_dataset, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(
-        build_multimodal_dataset,
-        "build_source_configs",
-        lambda _source_names: {"hope": {"dataset": {"root_dir": "/unused"}}, "housecat6d": {"dataset": {"root_dir": "/unused"}}},
-    )
-    monkeypatch.setattr(build_multimodal_dataset, "load_camera_for_frame", _fake_load_camera_for_frame)
 
     summary = build_multimodal_dataset.build_multimodal_dataset(
         rgb_dir=rgb_dir,
@@ -409,6 +405,82 @@ def test_build_dataset_allows_missing_polished_label(tmp_path, monkeypatch):
         hope_dir / "point_clouds/scene_0000_0000.ply",
         np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
     )
+    _write_json(
+        hope_dir / "grid_meta/scene_0000_0000.json",
+        {"grid": "meta", "camera": _make_fake_camera_dict()},
+    )
+    _write_json(
+        hope_dir / "samples/scene_0000_0000.json",
+        {
+            "samples": [
+                {
+                    "sample_id": "scene_0000_0000_obj_0_p000",
+                    "scene_id": "scene_0000",
+                    "frame_id": "0000",
+                    "canonical_aabb_object": [-1, -1, -1, 1, 1, 1],
+                    "transform_world": _make_transform((0.0, 0.0, 0.0)),
+                    "center_world": [0.0, 0.0, 0.0],
+                    "aabb_world": [-1, -1, -1, 1, 1, 1],
+                    "yaw_degrees": 0.0,
+                }
+            ]
+        },
+    )
+    _write_json(
+        label_json,
+        [
+            {
+                "image_filename": "hope__scene_0000_0000_obj_0_p000.png",
+                "sample_id": "scene_0000_0000_obj_0_p000",
+                "source_name": "hope",
+                "label": "raw prompt",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(build_multimodal_dataset, "PROJECT_ROOT", tmp_path)
+
+    summary = build_multimodal_dataset.build_multimodal_dataset(
+        rgb_dir=rgb_dir,
+        label_json=label_json,
+        source_dirs=[hope_dir],
+        output_dir=output_dir,
+        train_ratio=0.8,
+        valid_ratio=0.1,
+        seed=42,
+    )
+
+    assert summary["total_samples"] == 1
+    payloads = [
+        json.loads((output_dir / split_name).read_text(encoding="utf-8"))
+        for split_name in ("train.json", "valid.json", "test.json")
+    ]
+    samples = [sample for payload in payloads for sample in payload["samples"]]
+    assert samples[0]["prompt"] == "raw prompt"
+    assert samples[0]["polished_prompt"] == ""
+
+
+def test_build_dataset_raises_on_missing_grid_meta_camera(tmp_path, monkeypatch):
+    """
+    作用：验证旧版 placement 输出缺少 grid_meta.camera 时会抛出明确错误。
+
+    输入：
+        tmp_path: pytest 临时目录
+        monkeypatch: pytest monkeypatch 工具
+    输出：
+        无，通过断言验证结果
+    """
+    rgb_dir = tmp_path / "outputs/placement_rgb_bbox_vis"
+    hope_dir = tmp_path / "outputs/hope"
+    output_dir = tmp_path / "data/annotations/placement_multimodal"
+    label_json = tmp_path / "outputs/auto_labels/all_labels.json"
+
+    rgb_dir.mkdir(parents=True, exist_ok=True)
+    (rgb_dir / "hope__scene_0000_0000_obj_0_p000.png").write_bytes(b"png")
+    _write_ascii_ply(
+        hope_dir / "point_clouds/scene_0000_0000.ply",
+        np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
+    )
     _write_json(hope_dir / "grid_meta/scene_0000_0000.json", {"grid": "meta"})
     _write_json(
         hope_dir / "samples/scene_0000_0000.json",
@@ -440,43 +512,22 @@ def test_build_dataset_allows_missing_polished_label(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(build_multimodal_dataset, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(
-        build_multimodal_dataset,
-        "build_source_configs",
-        lambda _source_names: {"hope": {"dataset": {"root_dir": "/unused"}}},
-    )
 
-    def _fake_load_camera_for_frame(source_name, source_cfg, scene_id, frame_id):
-        """
-        作用：返回固定测试相机参数，避免读取真实数据集。
-        """
-        del source_name, source_cfg, scene_id, frame_id
-        return _make_fake_camera_dict()
-
-    monkeypatch.setattr(
-        build_multimodal_dataset,
-        "load_camera_for_frame",
-        _fake_load_camera_for_frame,
-    )
-
-    summary = build_multimodal_dataset.build_multimodal_dataset(
-        rgb_dir=rgb_dir,
-        label_json=label_json,
-        source_dirs=[hope_dir],
-        output_dir=output_dir,
-        train_ratio=0.8,
-        valid_ratio=0.1,
-        seed=42,
-    )
-
-    assert summary["total_samples"] == 1
-    payloads = [
-        json.loads((output_dir / split_name).read_text(encoding="utf-8"))
-        for split_name in ("train.json", "valid.json", "test.json")
-    ]
-    samples = [sample for payload in payloads for sample in payload["samples"]]
-    assert samples[0]["prompt"] == "raw prompt"
-    assert samples[0]["polished_prompt"] == ""
+    try:
+        build_multimodal_dataset.build_multimodal_dataset(
+            rgb_dir=rgb_dir,
+            label_json=label_json,
+            source_dirs=[hope_dir],
+            output_dir=output_dir,
+            train_ratio=0.8,
+            valid_ratio=0.1,
+            seed=42,
+        )
+    except ValueError as exc:
+        assert "Missing camera in grid_meta" in str(exc)
+        assert "backfill_placement_camera_meta.py" in str(exc)
+    else:
+        raise AssertionError("expected ValueError when grid_meta.camera is missing")
 
 
 def test_build_frame_lookup_ignores_samples_without_rgb_before_label_check(tmp_path, monkeypatch):

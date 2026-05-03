@@ -86,6 +86,24 @@ def save_json(path, data):
         json.dump(data, f, indent=2, default=_json_default)
 
 
+def camera_to_json(camera):
+    """
+    用法: payload = camera_to_json(scene.camera)
+    作用: 将 CameraParams 转成 placement 元数据可保存的 JSON 字段
+    输入: camera: CameraParams，已按 SceneData.unit 标准化的相机参数
+    输出: dict，包含内参、图像尺寸和 camera->world 外参
+    """
+    return {
+        "fx": float(camera.fx),
+        "fy": float(camera.fy),
+        "cx": float(camera.cx),
+        "cy": float(camera.cy),
+        "img_w": int(camera.img_w),
+        "img_h": int(camera.img_h),
+        "E_c2w": np.asarray(camera.E_c2w, dtype=np.float64).tolist(),
+    }
+
+
 def save_placement_annotations(path, annotations):
     """保存按物体分组的 placement 主标注。"""
     save_json(path, annotations)

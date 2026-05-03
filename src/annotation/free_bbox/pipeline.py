@@ -40,7 +40,7 @@ from src.annotation.free_bbox.filters import (
 from src.annotation.free_bbox.cluster import cluster_placements
 from src.annotation.free_bbox.io_utils import (
     save_ply, save_occupancy_ply, save_placement_annotations,
-    save_placement_samples, save_grid_meta,
+    save_placement_samples, save_grid_meta, camera_to_json,
 )
 from src.utils.coord_utils import transform_points
 
@@ -219,6 +219,7 @@ class PlacementPipeline:
                     "scene_id": scene.scene_id,
                     "frame_id": scene.frame_id,
                     "unit": scene.unit,
+                    "camera": camera_to_json(camera),
                 })
             save_occupancy_ply(
                 output_paths["occupancy_grid_ply"],
