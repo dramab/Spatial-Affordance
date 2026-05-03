@@ -11,7 +11,6 @@ DBSCAN 聚类：对放置候选在世界坐标 XY 平面聚类，
 import numpy as np
 from sklearn.cluster import DBSCAN
 
-from src.annotation.free_bbox.occupancy import FREE
 from src.annotation.free_bbox.voxel_utils import voxel_to_world
 
 

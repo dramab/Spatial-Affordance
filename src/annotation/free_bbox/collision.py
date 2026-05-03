@@ -3,7 +3,7 @@ src/annotation/free_bbox/collision.py
 --------------------------------------
 FFT 碰撞检测：在 (X, Y, θ) 配置空间中搜索无碰撞放置位置。
 
-通过逐层 2D FFT 卷积检测碰撞，支持可选的 CuPy GPU 加速。
+通过逐层 2D FFT 卷积检测碰撞。
 物体使用纯 yaw 旋转（平放姿态），roll=0, pitch=0。
 
 用法:
@@ -15,23 +15,13 @@ import numpy as np
 from scipy.signal import fftconvolve
 
 from src.utils.coord_utils import (
-    rotation_z_3x3, transform_points, compute_placed_transform,
+    compute_placed_transform,
     analyze_pose_orientation, compute_placed_transform_with_orientation
 )
-from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
 from src.annotation.free_bbox.grid_ops import voxelize_obb, dilate_obstacles_xy
-from src.annotation.free_bbox.voxel_utils import voxel_to_world
-
-# GPU 后端（可选）
-try:
-    import cupy as cp
-    from cupyx.scipy.signal import fftconvolve as gpu_fftconvolve
-    HAS_GPU = True
-except ImportError:
-    HAS_GPU = False
 
 
-def _compute_collision_slice(obstacle, obj_mask, landing_z, use_gpu=False):
+def _compute_collision_slice(obstacle, obj_mask, landing_z):
     """
     在 landing_z 高度计算 2D 碰撞图。
 
@@ -41,7 +31,6 @@ def _compute_collision_slice(obstacle, obj_mask, landing_z, use_gpu=False):
         obstacle: (Gx, Gy, Gz) bool 障碍物掩码
         obj_mask: (ox, oy, oz) bool 物体体素掩码
         landing_z: int 放置的 Z 层起始索引
-        use_gpu: bool 是否使用 GPU 加速
     输出:
         (nx, ny) float32 碰撞图，值 > 0 表示碰撞；None 如果尺寸不合法
     """
@@ -52,40 +41,24 @@ def _compute_collision_slice(obstacle, obj_mask, landing_z, use_gpu=False):
     if nx <= 0 or ny <= 0:
         return None
 
-    if use_gpu and HAS_GPU:
-        collision = cp.zeros((nx, ny), dtype=cp.float32)
-        for dz in range(oz):
-            z_idx = landing_z + dz
-            if z_idx < 0 or z_idx >= Gz:
-                continue
-            obj_slice = obj_mask[:, :, dz]
-            if obj_slice.sum() == 0:
-                continue
-            obs_gpu = cp.asarray(obstacle[:, :, z_idx].astype(np.float32))
-            mask_gpu = cp.asarray(
-                np.ascontiguousarray(obj_slice[::-1, ::-1]).astype(np.float32))
-            collision += gpu_fftconvolve(obs_gpu, mask_gpu, mode="valid")
-        return cp.asnumpy(collision)
-    else:
-        collision = np.zeros((nx, ny), dtype=np.float32)
-        for dz in range(oz):
-            z_idx = landing_z + dz
-            if z_idx < 0 or z_idx >= Gz:
-                continue
-            obj_slice = obj_mask[:, :, dz]
-            if obj_slice.sum() == 0:
-                continue
-            collision += fftconvolve(
-                obstacle[:, :, z_idx].astype(np.float32),
-                obj_slice[::-1, ::-1].astype(np.float32),
-                mode="valid")
-        return collision
+    collision = np.zeros((nx, ny), dtype=np.float32)
+    for dz in range(oz):
+        z_idx = landing_z + dz
+        if z_idx < 0 or z_idx >= Gz:
+            continue
+        obj_slice = obj_mask[:, :, dz]
+        if obj_slice.sum() == 0:
+            continue
+        collision += fftconvolve(
+            obstacle[:, :, z_idx].astype(np.float32),
+            obj_slice[::-1, ::-1].astype(np.float32),
+            mode="valid")
+    return collision
 
 
 def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
                           table_z, surface_mask_2d,
                           safety_margin=0.5, yaw_steps=24,
-                          use_gpu=False,
                           preserve_orientation=True,
                           orientation_threshold_deg=15.0):
     """
@@ -102,7 +75,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         7. 收集所有无碰撞位置
 
     输入:
-        grid_work: (Gx, Gy, Gz) uint8 工作栅格（目标物体已移除）
+        grid_work: (Gx, Gy, Gz) uint8 工作栅格
         bbox3d: (6,) 物体 canonical AABB
         T_obj2world: (4, 4) 物体原始 object→world 变换
         vp: dict 体素参数
@@ -110,7 +83,6 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
         surface_mask_2d: (Gx, Gy) bool 支撑面掩码
         safety_margin: float 安全边距（场景单位）
         yaw_steps: int yaw 旋转离散步数
-        use_gpu: bool 是否使用 GPU
         preserve_orientation: bool 是否保留原始合理姿态
         orientation_threshold_deg: float 姿态判断容差（度）
             - 只要任一局部轴与世界竖直方向足够对齐，即视为可保留姿态
@@ -206,7 +178,7 @@ def find_table_placements(grid_work, bbox3d, T_obj2world, vp,
 
         # FFT 碰撞检测
         coll = _compute_collision_slice(
-            obstacle_roi, obj_mask, landing_z, use_gpu=use_gpu)
+            obstacle_roi, obj_mask, landing_z)
 
         if coll is None:
             yaw_rel_voxels.append(rel_rot)
