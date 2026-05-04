@@ -283,6 +283,7 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "size_consistent": bool(size.get("size_consistent")),
         "mean_relative_size_error": size.get("mean_relative_size_error"),
         "max_axis_relative_size_error": size.get("max_axis_relative_size_error"),
+        "max_axis_absolute_size_error_cm": size.get("max_axis_absolute_size_error_cm"),
         "size_l2_cm": size.get("size_l2_cm"),
         "pred_box_world": prediction.get("pred_box_world", []),
         "gt_box_world": prediction.get("gt_box_world", []),
@@ -1011,7 +1012,7 @@ const sortItems = (list, mode) => {
   } else if (mode === "collision_desc") {
     sorted.sort((a, b) => num(b.occupied_collision_ratio) - num(a.occupied_collision_ratio));
   } else if (mode === "size_error_desc") {
-    sorted.sort((a, b) => num(b.max_axis_relative_size_error) - num(a.max_axis_relative_size_error));
+    sorted.sort((a, b) => num(b.max_axis_absolute_size_error_cm) - num(a.max_axis_absolute_size_error_cm));
   } else if (mode === "source") {
     sorted.sort((a, b) => `${a.source_name} ${a.sample_id}`.localeCompare(`${b.source_name} ${b.sample_id}`));
   }
@@ -1111,7 +1112,7 @@ const renderCard = (item) => {
         <div class="badges">${renderBadges(item)}</div>
         <div class="mini-metrics">
           <span><strong>${formatPercent(item.occupied_collision_ratio)}</strong>碰撞率</span>
-          <span><strong>${formatPercent(item.max_axis_relative_size_error)}</strong>最大尺寸误差</span>
+          <span><strong>${formatNumber(item.max_axis_absolute_size_error_cm, 2)}</strong>最大尺寸误差 cm</span>
           <span><strong>${formatNumber(item.size_l2_cm, 2)}</strong>L2 cm</span>
         </div>
         <div class="relation">${item.expected_relation || "N/A"} -> ${item.pred_relation || "N/A"}</div>
@@ -1137,7 +1138,7 @@ const openDialog = (item) => {
     ["occupied collision ratio", formatPercent(item.occupied_collision_ratio)],
     ["unknown overlap ratio", formatPercent(item.unknown_overlap_ratio)],
     ["mean size error", formatPercent(item.mean_relative_size_error)],
-    ["max axis size error", formatPercent(item.max_axis_relative_size_error)],
+    ["max axis size error cm", formatNumber(item.max_axis_absolute_size_error_cm, 3)],
     ["size L2 cm", formatNumber(item.size_l2_cm, 3)],
     ["vis path", item.vis_path],
   ];

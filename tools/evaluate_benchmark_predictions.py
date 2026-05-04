@@ -50,8 +50,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.metrics.placement_eval import (
     DEFAULT_COLLISION_RATIO_THRESHOLD,
+    DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM,
+    DEFAULT_SIZE_ABS_THRESHOLD_CM,
     DEFAULT_SIZE_MAX_REL_THRESHOLD,
     DEFAULT_SIZE_MEAN_REL_THRESHOLD,
+    DEFAULT_SUPPORT_IGNORE_LAYERS,
     evaluate_collision,
     evaluate_direction,
     evaluate_size_consistency,
@@ -77,10 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/benchmark_prediction_eval"), help="输出目录")
     parser.add_argument("--sample-ids", nargs="+", default=None, help="可选，仅评测指定 sample_id")
     parser.add_argument("--limit", type=int, default=None, help="可选，仅评测前 N 个样本")
-    parser.add_argument("--progress-interval", type=int, default=50, help="进度打印间隔，默认 50")
+    parser.add_argument("--progress-interval", type=int, default=50, help="进度打印间隔")
     parser.add_argument("--collision-ratio-threshold", type=float, default=DEFAULT_COLLISION_RATIO_THRESHOLD)
+    parser.add_argument("--support-ignore-layers", type=int, default=DEFAULT_SUPPORT_IGNORE_LAYERS, help="从 GT 最低体素层向下忽略的桌面支撑层数")
     parser.add_argument("--size-mean-rel-threshold", type=float, default=DEFAULT_SIZE_MEAN_REL_THRESHOLD)
     parser.add_argument("--size-max-rel-threshold", type=float, default=DEFAULT_SIZE_MAX_REL_THRESHOLD)
+    parser.add_argument("--size-abs-threshold-cm", type=float, default=DEFAULT_SIZE_ABS_THRESHOLD_CM, help="尺寸单轴绝对误差阈值")
+    parser.add_argument("--direction-center-abs-threshold-cm", type=float, default=DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM, help="方向评测中心点直通阈值")
     parser.add_argument("--write-csv", action="store_true", help="额外导出 per_sample_metrics.csv")
     return parser
 
@@ -229,6 +235,7 @@ def evaluate_one_prediction(
             target_box_world=benchmark_sample["target_box_world"],
             mean_relative_threshold=args.size_mean_rel_threshold,
             max_axis_relative_threshold=args.size_max_rel_threshold,
+            absolute_threshold_cm=args.size_abs_threshold_cm,
         )
     except Exception as exc:
         size_result = make_skip_result(f"size metric failed: {exc}")
@@ -241,6 +248,8 @@ def evaluate_one_prediction(
             occupancy_grid=occupancy_grid,
             voxel_params=occupancy["voxel_params"],
             collision_ratio_threshold=args.collision_ratio_threshold,
+            target_box_world=benchmark_sample["target_box_world"],
+            support_ignore_layers=args.support_ignore_layers,
         )
         collision_result["occupancy_grid_path"] = occupancy["path"]
     except Exception as exc:
@@ -254,6 +263,8 @@ def evaluate_one_prediction(
             reference_corners_world=np.asarray(direction["reference_corners_world"], dtype=np.float64),
             camera=benchmark_sample["camera"],
             expected_relation=str(direction["expected_relation"]),
+            target_box_world=benchmark_sample["target_box_world"],
+            center_abs_threshold_cm=args.direction_center_abs_threshold_cm,
         )
         direction_result["reference_object_id"] = str(direction["reference_object_id"])
         direction_result["reference_class_name"] = direction.get("reference_class_name")
@@ -310,10 +321,11 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
     fieldnames = [
         "sample_id", "source_name", "scene_id", "frame_id", "object_id",
         "placement_success", "collision_evaluated", "collision_free",
-        "occupied_collision_ratio", "direction_evaluated", "direction_correct",
+        "occupied_collision_ratio", "ignored_support_layers", "ignored_support_occupied_count",
+        "direction_evaluated", "direction_correct", "center_match",
         "expected_relation", "pred_relation", "reference_object_id",
         "size_evaluated", "size_consistent", "mean_relative_size_error",
-        "max_axis_relative_size_error", "size_l2_cm",
+        "max_axis_relative_size_error", "max_axis_absolute_size_error_cm", "size_l2_cm",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -333,8 +345,11 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "collision_evaluated": collision.get("evaluated"),
                 "collision_free": collision.get("collision_free"),
                 "occupied_collision_ratio": collision.get("occupied_collision_ratio"),
+                "ignored_support_layers": collision.get("ignored_support_layers"),
+                "ignored_support_occupied_count": collision.get("ignored_support_occupied_count"),
                 "direction_evaluated": direction.get("evaluated"),
                 "direction_correct": direction.get("direction_correct"),
+                "center_match": direction.get("center_match"),
                 "expected_relation": direction.get("expected_relation"),
                 "pred_relation": direction.get("pred_relation"),
                 "reference_object_id": direction.get("reference_object_id"),
@@ -342,6 +357,7 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "size_consistent": size.get("size_consistent"),
                 "mean_relative_size_error": size.get("mean_relative_size_error"),
                 "max_axis_relative_size_error": size.get("max_axis_relative_size_error"),
+                "max_axis_absolute_size_error_cm": size.get("max_axis_absolute_size_error_cm"),
                 "size_l2_cm": size.get("size_l2_cm"),
             })
 
@@ -389,8 +405,12 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         },
         "thresholds": {
             "collision_ratio_threshold": float(args.collision_ratio_threshold),
+            "collision_requires_zero_occupied": True,
+            "support_ignore_layers": int(args.support_ignore_layers),
             "size_mean_relative_threshold": float(args.size_mean_rel_threshold),
             "size_max_axis_relative_threshold": float(args.size_max_rel_threshold),
+            "size_abs_threshold_cm": float(args.size_abs_threshold_cm),
+            "direction_center_abs_threshold_cm": float(args.direction_center_abs_threshold_cm),
         },
         "sample_count": len(per_sample_records),
         "summary": summarize_metric_records(per_sample_records),

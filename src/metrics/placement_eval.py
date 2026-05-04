@@ -30,9 +30,12 @@ from src.annotation.free_bbox.occupancy import OCCUPIED, UNKNOWN
 from src.utils.coord_utils import box7d_to_corners_world, rotation_z_3x3, transform_points
 
 
-DEFAULT_COLLISION_RATIO_THRESHOLD = 0.01
+DEFAULT_COLLISION_RATIO_THRESHOLD = 0.003
 DEFAULT_SIZE_MEAN_REL_THRESHOLD = 0.10
 DEFAULT_SIZE_MAX_REL_THRESHOLD = 0.15
+DEFAULT_SIZE_ABS_THRESHOLD_CM = 1.0
+DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM = 1.0
+DEFAULT_SUPPORT_IGNORE_LAYERS = 4
 EPS = 1.0e-9
 
 
@@ -104,20 +107,56 @@ def box7d_to_occupancy_voxels(
     )
 
 
+def infer_support_layers_from_target_box(
+    target_box_world: Sequence[float],
+    voxel_params: Mapping[str, Any],
+    grid_shape: Sequence[int],
+    support_ignore_layers: int = DEFAULT_SUPPORT_IGNORE_LAYERS,
+) -> list[int]:
+    """
+    用法: layers = infer_support_layers_from_target_box(gt_box, voxel_params, grid.shape, 2)
+    作用: 由 GT 放置框最低体素层反推需要忽略的桌面支撑层
+    输入:
+        target_box_world: 长度 7 的 GT 世界坐标 box
+        voxel_params: dict，包含 origin 和 voxel_size
+        grid_shape: occupancy grid 形状
+        support_ignore_layers: 从 GT 最低体素层向下忽略的层数
+    输出: list[int]，位于 grid 范围内的 Z 层索引
+    """
+    layer_count = max(0, int(support_ignore_layers))
+    if layer_count == 0:
+        return []
+    target_voxels = box7d_to_occupancy_voxels(
+        target_box_world,
+        voxel_params=voxel_params,
+        grid_shape=grid_shape,
+    )
+    if len(target_voxels) == 0:
+        return []
+    grid_z = int(np.asarray(grid_shape, dtype=int)[2])
+    landing_z = int(target_voxels[:, 2].min())
+    layers = [landing_z - offset for offset in range(1, layer_count + 1)]
+    return [layer for layer in layers if 0 <= layer < grid_z]
+
+
 def evaluate_collision(
     pred_box_world: Sequence[float],
     occupancy_grid: np.ndarray,
     voxel_params: Mapping[str, Any],
     collision_ratio_threshold: float = DEFAULT_COLLISION_RATIO_THRESHOLD,
+    target_box_world: Sequence[float] | None = None,
+    support_ignore_layers: int = 0,
 ) -> dict[str, Any]:
     """
-    用法: result = evaluate_collision(pred_box, grid, voxel_params)
+    用法: result = evaluate_collision(pred_box, grid, voxel_params, target_box_world=gt_box)
     作用: 使用上游 occupancy grid 评估预测 box 是否碰撞 OCCUPIED 体素
     输入:
         pred_box_world: 长度 7 的预测世界坐标 box
         occupancy_grid: ndarray(Gx,Gy,Gz)，FREE=0、OCCUPIED=1、UNKNOWN=2
         voxel_params: dict，包含 origin 和 voxel_size
         collision_ratio_threshold: 允许的最大 OCCUPIED 体素占预测体素比例
+        target_box_world: 可选 GT box，用于推断桌面支撑层
+        support_ignore_layers: 从 GT 最低体素层向下忽略的支撑层数
     输出: dict，包含 collision_free、occupied_collision_ratio、unknown_overlap_ratio 等字段
     """
     grid = np.asarray(occupancy_grid)
@@ -141,23 +180,46 @@ def evaluate_collision(
             "unknown_voxel_count": 0,
             "unknown_overlap_ratio": None,
             "collision_ratio_threshold": threshold,
+            "support_ignore_layers": int(support_ignore_layers),
+            "ignored_support_layers": [],
+            "ignored_support_occupied_count": 0,
+            "collision_requires_zero_occupied": True,
         }
 
     states = grid[pred_voxels[:, 0], pred_voxels[:, 1], pred_voxels[:, 2]]
-    occupied_count = int(np.count_nonzero(states == OCCUPIED))
+    occupied_mask = states == OCCUPIED
+    ignored_layers: list[int] = []
+    ignored_support_occupied_count = 0
+    if target_box_world is not None and int(support_ignore_layers) > 0:
+        ignored_layers = infer_support_layers_from_target_box(
+            target_box_world,
+            voxel_params=voxel_params,
+            grid_shape=grid.shape,
+            support_ignore_layers=int(support_ignore_layers),
+        )
+        if ignored_layers:
+            support_mask = np.isin(pred_voxels[:, 2], np.asarray(ignored_layers, dtype=int))
+            ignored_support_occupied_count = int(np.count_nonzero(occupied_mask & support_mask))
+            occupied_mask = occupied_mask & ~support_mask
+
+    occupied_count = int(np.count_nonzero(occupied_mask))
     unknown_count = int(np.count_nonzero(states == UNKNOWN))
     occupied_ratio = float(occupied_count / max(pred_voxel_count, 1))
     unknown_ratio = float(unknown_count / max(pred_voxel_count, 1))
 
     return {
         "evaluated": True,
-        "collision_free": occupied_ratio <= threshold,
+        "collision_free": occupied_count == 0,
         "pred_voxel_count": pred_voxel_count,
         "occupied_voxel_count": occupied_count,
         "occupied_collision_ratio": occupied_ratio,
         "unknown_voxel_count": unknown_count,
         "unknown_overlap_ratio": unknown_ratio,
         "collision_ratio_threshold": threshold,
+        "support_ignore_layers": int(support_ignore_layers),
+        "ignored_support_layers": ignored_layers,
+        "ignored_support_occupied_count": ignored_support_occupied_count,
+        "collision_requires_zero_occupied": True,
     }
 
 
@@ -166,6 +228,7 @@ def evaluate_size_consistency(
     target_box_world: Sequence[float],
     mean_relative_threshold: float = DEFAULT_SIZE_MEAN_REL_THRESHOLD,
     max_axis_relative_threshold: float = DEFAULT_SIZE_MAX_REL_THRESHOLD,
+    absolute_threshold_cm: float = DEFAULT_SIZE_ABS_THRESHOLD_CM,
 ) -> dict[str, Any]:
     """
     用法: result = evaluate_size_consistency(pred_box, gt_box)
@@ -175,27 +238,30 @@ def evaluate_size_consistency(
         target_box_world: 长度 7 的 GT 世界坐标 box
         mean_relative_threshold: 三轴平均相对误差阈值
         max_axis_relative_threshold: 单轴最大相对误差阈值
+        absolute_threshold_cm: 单轴尺寸绝对误差阈值，单位 cm
     输出: dict，包含 size_consistent、mean_relative_size_error、max_axis_relative_size_error 等字段
     """
     pred_box = as_box7d(pred_box_world, "pred_box_world")
     target_box = as_box7d(target_box_world, "target_box_world")
+    absolute_errors = np.abs(pred_box[3:6] - target_box[3:6])
     relative_errors = np.abs(pred_box[3:6] - target_box[3:6]) / np.maximum(np.abs(target_box[3:6]), EPS)
     mean_relative_error = float(np.mean(relative_errors))
     max_axis_relative_error = float(np.max(relative_errors))
-    size_l2_cm = float(np.linalg.norm(pred_box[3:6] - target_box[3:6]))
-    size_consistent = (
-        mean_relative_error <= float(mean_relative_threshold)
-        and max_axis_relative_error <= float(max_axis_relative_threshold)
-    )
+    max_axis_absolute_error = float(np.max(absolute_errors))
+    size_l2_cm = float(np.linalg.norm(absolute_errors))
+    size_consistent = bool(np.all(absolute_errors <= float(absolute_threshold_cm)))
     return {
         "evaluated": True,
-        "size_consistent": bool(size_consistent),
+        "size_consistent": size_consistent,
+        "axis_absolute_size_errors_cm": absolute_errors.astype(np.float64).tolist(),
+        "max_axis_absolute_size_error_cm": max_axis_absolute_error,
         "relative_size_errors": relative_errors.astype(np.float64).tolist(),
         "mean_relative_size_error": mean_relative_error,
         "max_axis_relative_size_error": max_axis_relative_error,
         "size_l2_cm": size_l2_cm,
         "mean_relative_threshold": float(mean_relative_threshold),
         "max_axis_relative_threshold": float(max_axis_relative_threshold),
+        "absolute_threshold_cm": float(absolute_threshold_cm),
     }
 
 
@@ -204,6 +270,8 @@ def evaluate_direction(
     reference_corners_world: np.ndarray,
     camera: Mapping[str, Any],
     expected_relation: str,
+    target_box_world: Sequence[float] | None = None,
+    center_abs_threshold_cm: float = DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM,
 ) -> dict[str, Any]:
     """
     用法: result = evaluate_direction(pred_box, ref_corners, camera, "the right of")
@@ -213,10 +281,28 @@ def evaluate_direction(
         reference_corners_world: ndarray(N,3)，指令目标参考物世界坐标角点
         camera: dict，包含 fx/fy/cx/cy/E_c2w
         expected_relation: str，auto_label 生成指令时保存的目标关系
+        target_box_world: 可选 GT box，中心足够接近时直接判为方向正确
+        center_abs_threshold_cm: 中心三轴绝对误差阈值，单位 cm
     输出: dict，包含 direction_correct、pred_relation、expected_relation
     """
-    auto_label = _load_auto_label_module()
     pred_box = as_box7d(pred_box_world, "pred_box_world")
+    expected_relation = str(expected_relation)
+    if target_box_world is not None:
+        target_box = as_box7d(target_box_world, "target_box_world")
+        center_abs_errors = np.abs(pred_box[:3] - target_box[:3])
+        center_match = bool(np.all(center_abs_errors <= float(center_abs_threshold_cm)))
+        if center_match:
+            return {
+                "evaluated": True,
+                "direction_correct": True,
+                "pred_relation": "center_match",
+                "expected_relation": expected_relation,
+                "center_match": True,
+                "center_abs_errors_cm": center_abs_errors.astype(np.float64).tolist(),
+                "center_abs_threshold_cm": float(center_abs_threshold_cm),
+            }
+
+    auto_label = _load_auto_label_module()
     pred_corners = box7d_to_corners_world(pred_box)
     e_c2w = np.asarray(camera["E_c2w"], dtype=np.float64)
     k_matrix = np.array(
@@ -233,13 +319,17 @@ def evaluate_direction(
         np.linalg.inv(e_c2w),
         k_matrix,
     )
-    expected_relation = str(expected_relation)
-    return {
+    result = {
         "evaluated": True,
         "direction_correct": pred_relation == expected_relation,
         "pred_relation": pred_relation,
         "expected_relation": expected_relation,
+        "center_match": False,
+        "center_abs_threshold_cm": float(center_abs_threshold_cm),
     }
+    if target_box_world is not None:
+        result["center_abs_errors_cm"] = center_abs_errors.astype(np.float64).tolist()
+    return result
 
 
 def merge_sample_metric_status(
@@ -354,6 +444,11 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         float(item.get("size", {}).get("max_axis_relative_size_error", 0.0))
         for item in size_items
     ]
+    max_abs_size_errors = [
+        float(item.get("size", {}).get("max_axis_absolute_size_error_cm", 0.0))
+        for item in size_items
+        if item.get("size", {}).get("max_axis_absolute_size_error_cm") is not None
+    ]
 
     return {
         "sample_count": sample_count,
@@ -377,6 +472,8 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         "median_relative_size_error": _safe_median(mean_size_errors),
         "mean_max_axis_size_error": _safe_mean(max_size_errors),
         "median_max_axis_size_error": _safe_median(max_size_errors),
+        "mean_max_axis_absolute_size_error_cm": _safe_mean(max_abs_size_errors),
+        "median_max_axis_absolute_size_error_cm": _safe_median(max_abs_size_errors),
     }
 
 

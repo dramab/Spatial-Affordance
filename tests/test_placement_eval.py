@@ -4,8 +4,10 @@ tests/test_placement_eval.py
 职责：测试 placement prediction metric 的核心几何计算。
 
 测试内容：
-- test_evaluate_collision_uses_occupancy_without_target_removal：
-  验证碰撞评测直接使用 occupancy grid，不移除目标物体原位置
+- test_evaluate_collision_ignores_two_support_layers_from_gt：
+  验证碰撞评测可按 GT 最低体素层忽略两层桌面 occupied
+- test_evaluate_collision_requires_zero_non_support_occupied：
+  验证忽略支撑层后仍有任意 occupied 即碰撞失败
 - test_evaluate_collision_reports_unknown_overlap：
   验证 UNKNOWN 体素只记录覆盖比例，不按碰撞失败处理
 - test_evaluate_size_consistency_thresholds：
@@ -64,26 +66,68 @@ def _make_object(obj_id: str, center: tuple[float, float, float]) -> ObjectInfo:
     )
 
 
-def test_evaluate_collision_uses_occupancy_without_target_removal():
+def test_evaluate_collision_ignores_two_support_layers_from_gt():
     """
-    作用：验证碰撞评测直接使用 occupancy grid，因此目标物体原位置若为 OCCUPIED 也会计入碰撞。
+    作用：验证根据 GT 最低体素层向下忽略两层桌面 occupied。
 
     输入：
         无，内部构造预测框和 occupancy grid
     输出：
         无，通过断言验证结果
     """
-    pred_box = [2.5, 2.5, 2.5, 2.0, 2.0, 2.0, 0.0]
+    pred_box = [2.5, 2.5, 2.5, 2.0, 2.0, 5.0, 0.0]
+    gt_box = [2.5, 2.5, 4.0, 2.0, 2.0, 4.0, 0.0]
     grid, voxel_params = _make_grid()
+    grid[2, 2, 0] = OCCUPIED
+    grid[2, 2, 1] = OCCUPIED
+
+    result = evaluate_collision(
+        pred_box,
+        grid,
+        voxel_params,
+        target_box_world=gt_box,
+        support_ignore_layers=2,
+    )
+
+    assert result["evaluated"] is True
+    assert result["collision_free"] is True
+    assert result["pred_voxel_count"] > 0
+    assert result["occupied_voxel_count"] == 0
+    assert result["ignored_support_layers"] == [1, 0]
+    assert result["ignored_support_occupied_count"] == 2
+    assert result["occupied_collision_ratio"] == 0.0
+
+
+def test_evaluate_collision_requires_zero_non_support_occupied():
+    """
+    作用：验证桌面支撑层之外只要存在 OCCUPIED，碰撞即失败。
+
+    输入：
+        无，内部构造预测框、GT 框和 occupancy grid
+    输出：
+        无，通过断言验证结果
+    """
+    pred_box = [2.5, 2.5, 2.5, 2.0, 2.0, 5.0, 0.0]
+    gt_box = [2.5, 2.5, 4.0, 2.0, 2.0, 4.0, 0.0]
+    grid, voxel_params = _make_grid()
+    grid[2, 2, 0] = OCCUPIED
+    grid[2, 2, 1] = OCCUPIED
     grid[2, 2, 2] = OCCUPIED
 
-    result = evaluate_collision(pred_box, grid, voxel_params)
+    result = evaluate_collision(
+        pred_box,
+        grid,
+        voxel_params,
+        collision_ratio_threshold=1.0,
+        target_box_world=gt_box,
+        support_ignore_layers=2,
+    )
 
     assert result["evaluated"] is True
     assert result["collision_free"] is False
-    assert result["pred_voxel_count"] > 0
     assert result["occupied_voxel_count"] == 1
-    assert result["occupied_collision_ratio"] > result["collision_ratio_threshold"]
+    assert result["ignored_support_occupied_count"] == 2
+    assert result["occupied_collision_ratio"] > 0.0
 
 
 def test_evaluate_collision_reports_unknown_overlap():
@@ -110,7 +154,7 @@ def test_evaluate_collision_reports_unknown_overlap():
 
 def test_evaluate_size_consistency_thresholds():
     """
-    作用：验证尺寸一致性同时受平均相对误差和单轴相对误差约束。
+    作用：验证尺寸一致性按单轴绝对误差阈值判断。
 
     输入：
         无，内部构造预测和 GT box
@@ -118,15 +162,16 @@ def test_evaluate_size_consistency_thresholds():
         无，通过断言验证结果
     """
     gt_box = [0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 0.0]
-    good_pred = [0.0, 0.0, 0.0, 10.5, 19.0, 31.0, 0.0]
-    bad_pred = [0.0, 0.0, 0.0, 10.0, 20.0, 36.0, 0.0]
+    good_pred = [0.0, 0.0, 0.0, 12.0, 18.0, 31.5, 0.0]
+    bad_pred = [0.0, 0.0, 0.0, 12.1, 20.0, 30.0, 0.0]
 
-    good = evaluate_size_consistency(good_pred, gt_box)
-    bad = evaluate_size_consistency(bad_pred, gt_box)
+    good = evaluate_size_consistency(good_pred, gt_box, absolute_threshold_cm=2.0)
+    bad = evaluate_size_consistency(bad_pred, gt_box, absolute_threshold_cm=2.0)
 
     assert good["size_consistent"] is True
     assert bad["size_consistent"] is False
-    assert bad["max_axis_relative_size_error"] > bad["max_axis_relative_threshold"]
+    assert good["max_axis_absolute_size_error_cm"] == 2.0
+    assert bad["max_axis_absolute_size_error_cm"] > bad["absolute_threshold_cm"]
 
 
 def test_evaluate_direction_matches_auto_label_relation():
@@ -158,6 +203,41 @@ def test_evaluate_direction_matches_auto_label_relation():
     assert result["evaluated"] is True
     assert result["pred_relation"] == "the right of"
     assert result["direction_correct"] is True
+
+
+def test_evaluate_direction_accepts_close_center_before_relation():
+    """
+    作用：验证预测中心与 GT 中心足够接近时，方向 metric 直接判定正确。
+
+    输入：
+        无，内部构造中心接近但期望方向不同的预测
+    输出：
+        无，通过断言验证中心直通逻辑
+    """
+    ref_obj = _make_object("ref", (0.0, 0.0, 10.0))
+    pred_box = [0.5, 0.5, 10.5, 0.4, 0.4, 0.4, 0.0]
+    gt_box = [0.0, 0.0, 10.0, 0.4, 0.4, 0.4, 0.0]
+    camera = {
+        "fx": 100.0,
+        "fy": 100.0,
+        "cx": 0.0,
+        "cy": 0.0,
+        "E_c2w": np.eye(4, dtype=np.float64).tolist(),
+    }
+
+    result = evaluate_direction(
+        pred_box_world=pred_box,
+        reference_corners_world=object_info_to_corners_world(ref_obj),
+        camera=camera,
+        expected_relation="behind",
+        target_box_world=gt_box,
+        center_abs_threshold_cm=1.0,
+    )
+
+    assert result["evaluated"] is True
+    assert result["direction_correct"] is True
+    assert result["center_match"] is True
+    assert result["pred_relation"] == "center_match"
 
 
 def test_summarize_metric_records_reports_rates():

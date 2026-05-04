@@ -1,0 +1,48 @@
+model_config_path: configs/base/model_ptv3.yaml
+
+dataset:
+  annotation_dir: data/annotations/placement_multimodal_simple
+  prompt_key: prompt
+  image_size: [480, 640]
+  scale_eps: 1.0e-6
+  max_points: 151072
+  point_sample_seed: 42
+
+dataloader:
+  train_batch_size: 10
+  val_batch_size: 10
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  train_shuffle: true
+  train_drop_last: false
+
+optimization:
+  epochs: 90
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  grad_clip_norm: 1.0
+
+scheduler:
+  type: cosine
+  min_lr: 1.0e-6
+
+loss:
+  center_weight:  5
+  size_weight: 5
+  yaw_weight: 0.2
+  smooth_l1_beta: 0.05
+
+train:
+  device: cuda
+  seed: 42
+  log_interval: 10
+  output_dir: outputs/model_ptv3_2
+  use_amp: false
+  cudnn_benchmark: true
+
+checkpoint:
+  resume_path: 
+  save_last_name: last.pth
+  save_best_name: best.pth

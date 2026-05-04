@@ -74,14 +74,15 @@ OCCUPIED = 1
 UNKNOWN  = 2
 ```
 
-这里不移除目标物体原位置。也就是说，如果预测框覆盖了 grid 中由目标物体原位置标记出来的 `OCCUPIED` 体素，该部分仍然计入碰撞。
+benchmark 评测会根据 GT 放置框最低体素层向下忽略桌面支撑层。当前默认忽略 2 层，用于匹配 placement pipeline 中 `landing_z = table_z + 1`，以及桌面表面可能跨两层 `OCCUPIED` 的情况。支撑层之外的目标物体原位置或其他 `OCCUPIED` 仍计入碰撞。
 
 流程：
 
 1. 将 `pred_box_world = [cx, cy, cz, sx, sy, sz, yaw_degrees]` 转成世界坐标 yaw-only OBB。
 2. 通过 `src.annotation.free_bbox.grid_ops.voxelize_obb` 将预测 OBB 体素化到 occupancy grid 索引空间。
-3. 统计预测体素中状态为 `OCCUPIED` 和 `UNKNOWN` 的数量。
-4. 归一化 `OCCUPIED` 碰撞比例：
+3. 将 `gt_box_world` 体素化，取 GT 最低体素层 `gt_landing_z`，默认忽略 `gt_landing_z - 1` 和 `gt_landing_z - 2` 两层的 `OCCUPIED`。
+4. 统计预测体素中状态为 `OCCUPIED` 和 `UNKNOWN` 的数量，其中 `OCCUPIED` 会排除上述支撑层。
+5. 归一化 `OCCUPIED` 碰撞比例：
 
 ```text
 occupied_collision_ratio = occupied_voxel_count / pred_voxel_count
@@ -90,7 +91,7 @@ occupied_collision_ratio = occupied_voxel_count / pred_voxel_count
 默认通过条件：
 
 ```text
-occupied_collision_ratio <= 0.01
+ignored_support_layers 后的 occupied_voxel_count == 0
 ```
 
 `UNKNOWN` 体素代表未观测空间，只报告覆盖比例，不直接作为碰撞失败条件：
@@ -105,6 +106,8 @@ unknown_overlap_ratio = unknown_voxel_count / pred_voxel_count
 - `pred_voxel_count`
 - `occupied_voxel_count`
 - `occupied_collision_ratio`
+- `ignored_support_layers`
+- `ignored_support_occupied_count`
 - `unknown_voxel_count`
 - `unknown_overlap_ratio`
 - `occupancy_grid_path`
@@ -122,9 +125,9 @@ unknown_overlap_ratio = unknown_voxel_count / pred_voxel_count
 流程：
 
 1. 根据 `reference_object_id` 在当前 scene 中找到参考物。
-2. 将预测 box 与参考物 box 输入 `auto_label.py` 同源空间关系函数。
-3. 得到 `pred_relation`。
-4. 比较：
+2. 若 `pred_box_world[:3]` 与 `gt_box_world[:3]` 三轴绝对误差都不超过 1cm，则直接判定方向正确。
+3. 否则将预测 box 与参考物 box 输入 `auto_label.py` 同源空间关系函数。
+4. 得到 `pred_relation` 并比较：
 
 ```text
 direction_correct = pred_relation == expected_relation
@@ -148,6 +151,8 @@ direction_correct = pred_relation == expected_relation
 - `direction_correct`
 - `expected_relation`
 - `pred_relation`
+- `center_match`
+- `center_abs_errors_cm`
 - `reference_object_id`
 - `reference_class_name`
 - `reference_name`
@@ -161,6 +166,7 @@ direction_correct = pred_relation == expected_relation
 比较 `pred_box_world[3:6]` 与 `gt_box_world[3:6]`：
 
 ```text
+axis_absolute_error_i = abs(pred_size_i - gt_size_i)
 axis_relative_error_i = abs(pred_size_i - gt_size_i) / gt_size_i
 mean_relative_size_error = mean(axis_relative_error)
 max_axis_relative_size_error = max(axis_relative_error)
@@ -169,14 +175,14 @@ max_axis_relative_size_error = max(axis_relative_error)
 默认通过条件：
 
 ```text
-mean_relative_size_error <= 0.10
-AND
-max_axis_relative_size_error <= 0.15
+max(axis_absolute_error) <= 2cm
 ```
 
 输出字段包括：
 
 - `size_consistent`
+- `axis_absolute_size_errors_cm`
+- `max_axis_absolute_size_error_cm`
 - `relative_size_errors`
 - `mean_relative_size_error`
 - `max_axis_relative_size_error`
