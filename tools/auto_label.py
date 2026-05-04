@@ -1053,15 +1053,93 @@ def infer_config_path(source_name: str) -> Path:
 def load_scene_cached(scene_cache: Dict, adapter, source_dir: Path, scene_id: str, frame_id: str):
     """
     用法: scene = load_scene_cached(scene_cache, adapter, source_dir, scene_id, frame_id)
-    作用: 按 source/scene/frame 缓存加载场景，避免重复读取同一帧。
+    作用: 按 source/scene/frame 缓存加载场景，优先读取补齐后的 scene_objects。
     输入: 场景缓存、数据集 adapter、source 目录、scene_id 和 frame_id。
     输出: SceneData 场景对象。
     """
     key = (source_dir.name, scene_id, frame_id)
     if key not in scene_cache:
-        scene_path = Path(adapter.root_dir) / scene_id
-        scene_cache[key] = adapter.load_scene(str(scene_path), frame_id)
+        scene_from_outputs = load_scene_from_placement_outputs(source_dir, scene_id, frame_id)
+        if scene_from_outputs is not None:
+            scene_cache[key] = scene_from_outputs
+        else:
+            scene_path = Path(adapter.root_dir) / scene_id
+            scene_cache[key] = adapter.load_scene(str(scene_path), frame_id)
     return scene_cache[key]
+
+
+def load_scene_from_placement_outputs(
+    source_dir: Path,
+    scene_id: str,
+    frame_id: str,
+) -> Optional[SceneData]:
+    """
+    用法: scene = load_scene_from_placement_outputs(Path("outputs/hope"), "scene_0000", "0000")
+    作用: 从 scene_objects 和 grid_meta 构造 auto_label 所需的轻量 SceneData
+    输入: source_dir: placement 输出根目录；scene_id/frame_id: 帧标识
+    输出: SceneData 或 None，缺少补齐文件时返回 None
+    """
+    prefix = f"{scene_id}_{frame_id}"
+    scene_objects_path = source_dir / "scene_objects" / f"{prefix}.json"
+    grid_meta_path = source_dir / "grid_meta" / f"{prefix}.json"
+    if not scene_objects_path.exists() or not grid_meta_path.exists():
+        return None
+
+    with scene_objects_path.open("r", encoding="utf-8") as f:
+        objects_payload = json.load(f)
+    with grid_meta_path.open("r", encoding="utf-8") as f:
+        grid_meta = json.load(f)
+    camera_payload = grid_meta.get("camera")
+    if not isinstance(camera_payload, dict):
+        return None
+
+    camera = camera_from_json(camera_payload)
+    objects = [
+        object_info_from_scene_object(record)
+        for record in objects_payload.get("objects", [])
+    ]
+    return SceneData(
+        scene_id=str(objects_payload.get("scene_id", scene_id)),
+        frame_id=str(objects_payload.get("frame_id", frame_id)),
+        rgb=np.zeros((camera.img_h, camera.img_w, 3), dtype=np.uint8),
+        depth=np.zeros((camera.img_h, camera.img_w), dtype=np.float32),
+        camera=camera,
+        objects=objects,
+        unit=str(objects_payload.get("unit", grid_meta.get("unit", "cm"))),
+    )
+
+
+def camera_from_json(payload: dict) -> CameraParams:
+    """
+    用法: camera = camera_from_json(payload)
+    作用: 将 grid_meta.camera JSON 转成 CameraParams
+    输入: payload: dict，包含 fx/fy/cx/cy/img_w/img_h/E_c2w
+    输出: CameraParams
+    """
+    return CameraParams(
+        fx=float(payload["fx"]),
+        fy=float(payload["fy"]),
+        cx=float(payload["cx"]),
+        cy=float(payload["cy"]),
+        img_w=int(payload["img_w"]),
+        img_h=int(payload["img_h"]),
+        E_c2w=np.asarray(payload["E_c2w"], dtype=np.float64),
+    )
+
+
+def object_info_from_scene_object(record: dict) -> ObjectInfo:
+    """
+    用法: obj = object_info_from_scene_object(record)
+    作用: 将 scene_objects 中的物体记录转成 ObjectInfo
+    输入: record: dict，包含 object_id、class_name、canonical_aabb_object、pose_world
+    输出: ObjectInfo
+    """
+    return ObjectInfo(
+        obj_id=str(record["object_id"]),
+        class_name=str(record["class_name"]),
+        bbox3d_canonical=np.asarray(record["canonical_aabb_object"], dtype=np.float64),
+        pose_world=np.asarray(record["pose_world"], dtype=np.float64),
+    )
 
 def parse_image_filename(image_path: Path) -> Optional[Tuple[str, str]]:
     """

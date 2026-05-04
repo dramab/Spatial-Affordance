@@ -41,6 +41,7 @@ from src.annotation.free_bbox.cluster import cluster_placements
 from src.annotation.free_bbox.io_utils import (
     save_ply, save_occupancy_ply, save_placement_annotations,
     save_placement_samples, save_grid_meta, camera_to_json,
+    save_scene_objects,
 )
 from src.utils.coord_utils import transform_points
 
@@ -51,6 +52,7 @@ _REQUIRED_OUTPUT_DIRS = (
     "point_clouds",
     "occupancy_grids",
     "grid_meta",
+    "scene_objects",
 )
 
 
@@ -79,6 +81,7 @@ def _build_output_paths(output_dir: str, scene_id: str, frame_id: str,
         "occupancy_grid_npy": os.path.join(root, "occupancy_grids", f"{prefix}.npy"),
         "occupancy_grid_ply": os.path.join(root, "occupancy_grids", f"{prefix}.ply"),
         "grid_meta": os.path.join(root, "grid_meta", f"{prefix}.json"),
+        "scene_objects": os.path.join(root, "scene_objects", f"{prefix}.json"),
     }
 
     dirs = {os.path.join(root, name) for name in _REQUIRED_OUTPUT_DIRS}
@@ -174,6 +177,7 @@ class PlacementPipeline:
             output_paths = _build_output_paths(
                 output_dir, scene.scene_id, scene.frame_id, save_vis)
             scene_prefix = output_paths["prefix"]
+            save_scene_objects(output_paths["scene_objects"], scene)
 
         # ── Step 1: 点云生成 ──────────────────────────────────────────────
         print("[1/6] Generating point cloud ...")

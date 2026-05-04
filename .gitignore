@@ -1,6 +1,7 @@
 # 数据与输出（不入git）
 data/
 outputs/
+benchmark/
 
 # Python
 __pycache__/

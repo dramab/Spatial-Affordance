@@ -14,7 +14,9 @@ import json
 import os
 import numpy as np
 
+from src.annotation.bbox3d.bbox_utils import get_bbox_corners
 from src.annotation.free_bbox.occupancy import FREE, OCCUPIED, UNKNOWN
+from src.utils.coord_utils import transform_points
 
 
 def save_ply(path, points, colors):
@@ -102,6 +104,53 @@ def camera_to_json(camera):
         "img_h": int(camera.img_h),
         "E_c2w": np.asarray(camera.E_c2w, dtype=np.float64).tolist(),
     }
+
+
+def object_info_to_json(obj):
+    """
+    用法: record = object_info_to_json(scene.objects[0])
+    作用: 将 ObjectInfo 转成可保存的全场景物体几何记录
+    输入: obj，包含 obj_id、class_name、bbox3d_canonical 与 pose_world
+    输出: dict，包含规范 AABB、世界位姿、世界角点与世界 AABB
+    """
+    canonical_aabb = np.asarray(obj.bbox3d_canonical, dtype=np.float64)
+    pose_world = np.asarray(obj.pose_world, dtype=np.float64)
+    corners_world = transform_points(get_bbox_corners(canonical_aabb), pose_world)
+    aabb_world = np.concatenate([corners_world.min(axis=0), corners_world.max(axis=0)])
+    return {
+        "object_id": str(obj.obj_id),
+        "class_name": str(obj.class_name),
+        "canonical_aabb_object": canonical_aabb.tolist(),
+        "pose_world": pose_world.tolist(),
+        "corners_world": corners_world.tolist(),
+        "aabb_world": aabb_world.tolist(),
+    }
+
+
+def scene_objects_to_json(scene):
+    """
+    用法: payload = scene_objects_to_json(scene)
+    作用: 构建当前帧所有物体的 benchmark 友好几何快照
+    输入: scene: SceneData，包含 scene_id、frame_id、unit 与 objects
+    输出: dict，可直接写入 scene_objects JSON
+    """
+    return {
+        "schema_version": "placement_scene_objects/v1",
+        "scene_id": str(scene.scene_id),
+        "frame_id": str(scene.frame_id),
+        "unit": str(getattr(scene, "unit", "cm")),
+        "objects": [object_info_to_json(obj) for obj in scene.objects],
+    }
+
+
+def save_scene_objects(path, scene):
+    """
+    用法: save_scene_objects(path, scene)
+    作用: 保存当前帧所有物体的几何快照
+    输入: path: str；scene: SceneData
+    输出: None
+    """
+    save_json(path, scene_objects_to_json(scene))
 
 
 def save_placement_annotations(path, annotations):

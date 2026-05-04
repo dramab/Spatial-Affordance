@@ -19,6 +19,7 @@ from tools.auto_label import (
     describe_spatial_relation,
     describe_vertical_relation,
     footprint_overlap_ratio,
+    load_scene_from_placement_outputs,
     project_box_center_to_pixel,
 )
 
@@ -66,6 +67,20 @@ def make_camera():
     return E_w2c, K
 
 
+def write_json(path: Path, payload):
+    """
+    用法: write_json(path, payload)
+    作用: 为测试写入 JSON 文件
+    输入: path: Path；payload: 可 JSON 序列化对象
+    输出: None
+    """
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def test_build_spatial_relation_record_preserves_reference_identity():
     """
     用法: pytest tests/test_auto_label_direction.py
@@ -89,6 +104,66 @@ def test_build_spatial_relation_record_preserves_reference_identity():
         "reference_name": "Pretty Object",
         "distance_cm": 12.5,
     }
+
+
+def test_load_scene_from_placement_outputs_uses_scene_objects(tmp_path):
+    """
+    用法: pytest tests/test_auto_label_direction.py
+    作用: 验证 auto_label 可从 scene_objects 和 grid_meta 构造轻量 SceneData。
+    输入: 临时 placement 输出目录
+    输出: 断言 SceneData 中包含所有补齐物体和相机参数。
+    """
+    source_dir = tmp_path / "outputs/hope"
+    write_json(
+        source_dir / "scene_objects/scene_0000_0000.json",
+        {
+            "schema_version": "placement_scene_objects/v1",
+            "scene_id": "scene_0000",
+            "frame_id": "0000",
+            "unit": "cm",
+            "objects": [
+                {
+                    "object_id": "obj_0",
+                    "class_name": "Target",
+                    "canonical_aabb_object": [-1, -1, -1, 1, 1, 1],
+                    "pose_world": np.eye(4, dtype=np.float64).tolist(),
+                    "corners_world": [],
+                    "aabb_world": [],
+                },
+                {
+                    "object_id": "obj_1",
+                    "class_name": "ReferenceOnly",
+                    "canonical_aabb_object": [-2, -1, -1, 2, 1, 1],
+                    "pose_world": np.eye(4, dtype=np.float64).tolist(),
+                    "corners_world": [],
+                    "aabb_world": [],
+                },
+            ],
+        },
+    )
+    write_json(
+        source_dir / "grid_meta/scene_0000_0000.json",
+        {
+            "unit": "cm",
+            "camera": {
+                "fx": 100.0,
+                "fy": 101.0,
+                "cx": 32.0,
+                "cy": 24.0,
+                "img_w": 64,
+                "img_h": 48,
+                "E_c2w": np.eye(4, dtype=np.float64).tolist(),
+            },
+        },
+    )
+
+    scene = load_scene_from_placement_outputs(source_dir, "scene_0000", "0000")
+
+    assert scene is not None
+    assert scene.camera.fx == 100.0
+    assert scene.rgb.shape == (48, 64, 3)
+    assert [obj.obj_id for obj in scene.objects] == ["obj_0", "obj_1"]
+    assert scene.objects[1].class_name == "ReferenceOnly"
 
 
 @pytest.mark.parametrize(
