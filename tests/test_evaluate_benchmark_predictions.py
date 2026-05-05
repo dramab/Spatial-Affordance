@@ -123,10 +123,8 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
         progress_interval=0,
         collision_ratio_threshold=0.01,
         support_ignore_layers=2,
-        size_mean_rel_threshold=0.10,
-        size_max_rel_threshold=0.15,
-        size_abs_threshold_cm=2.0,
-        direction_center_abs_threshold_cm=1.0,
+        volume_error_ratio_threshold=0.05,
+        direction_center_l2_threshold_cm=1.0,
         write_csv=True,
     )
 
@@ -138,7 +136,8 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
     assert per_sample["collision"]["collision_free"] is True
     assert per_sample["collision"]["support_ignore_layers"] == 2
     assert per_sample["size"]["size_consistent"] is True
-    assert per_sample["size"]["absolute_threshold_cm"] == 2.0
+    assert per_sample["size"]["volume_error_ratio_threshold"] == 0.05
+    assert per_sample["size"]["volume_error_ratio"] == 0.0
     assert per_sample["direction"]["direction_correct"] is True
     assert per_sample["direction"]["center_match"] is True
     assert per_sample["status"]["placement_success"] is True

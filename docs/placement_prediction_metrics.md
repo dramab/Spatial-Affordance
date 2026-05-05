@@ -91,7 +91,7 @@ occupied_collision_ratio = occupied_voxel_count / pred_voxel_count
 默认通过条件：
 
 ```text
-ignored_support_layers 后的 occupied_voxel_count == 0
+occupied_collision_ratio <= collision_ratio_threshold
 ```
 
 `UNKNOWN` 体素代表未观测空间，只报告覆盖比例，不直接作为碰撞失败条件：

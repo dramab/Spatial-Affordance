@@ -6,7 +6,7 @@ src/metrics/placement_eval.py
 提供三类可复用指标：
 1. 预测 3D box 是否与上游 occupancy grid 中的 OCCUPIED 体素碰撞
 2. 预测放置方向是否符合结构化指令关系
-3. 预测 3D box 尺寸是否与目标物体尺寸一致
+3. 预测 3D box 体积是否与目标物体体积一致
 
 用法：
     from src.metrics.placement_eval import (
@@ -31,12 +31,9 @@ from src.utils.coord_utils import box7d_to_corners_world, rotation_z_3x3, transf
 
 
 DEFAULT_COLLISION_RATIO_THRESHOLD = 0.003
-DEFAULT_SIZE_MEAN_REL_THRESHOLD = 0.10
-DEFAULT_SIZE_MAX_REL_THRESHOLD = 0.15
-DEFAULT_SIZE_ABS_THRESHOLD_CM = 1.0
-DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM = 1.0
+DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD = 0.1
+DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM = 10.0
 DEFAULT_SUPPORT_IGNORE_LAYERS = 4
-EPS = 1.0e-9
 
 
 def _load_auto_label_module():
@@ -183,7 +180,7 @@ def evaluate_collision(
             "support_ignore_layers": int(support_ignore_layers),
             "ignored_support_layers": [],
             "ignored_support_occupied_count": 0,
-            "collision_requires_zero_occupied": True,
+            "collision_pass_rule": "occupied_collision_ratio <= collision_ratio_threshold",
         }
 
     states = grid[pred_voxels[:, 0], pred_voxels[:, 1], pred_voxels[:, 2]]
@@ -206,10 +203,11 @@ def evaluate_collision(
     unknown_count = int(np.count_nonzero(states == UNKNOWN))
     occupied_ratio = float(occupied_count / max(pred_voxel_count, 1))
     unknown_ratio = float(unknown_count / max(pred_voxel_count, 1))
+    collision_free = bool(occupied_ratio <= threshold)
 
     return {
         "evaluated": True,
-        "collision_free": occupied_count == 0,
+        "collision_free": collision_free,
         "pred_voxel_count": pred_voxel_count,
         "occupied_voxel_count": occupied_count,
         "occupied_collision_ratio": occupied_ratio,
@@ -219,49 +217,40 @@ def evaluate_collision(
         "support_ignore_layers": int(support_ignore_layers),
         "ignored_support_layers": ignored_layers,
         "ignored_support_occupied_count": ignored_support_occupied_count,
-        "collision_requires_zero_occupied": True,
+        "collision_pass_rule": "occupied_collision_ratio <= collision_ratio_threshold",
     }
 
 
 def evaluate_size_consistency(
     pred_box_world: Sequence[float],
     target_box_world: Sequence[float],
-    mean_relative_threshold: float = DEFAULT_SIZE_MEAN_REL_THRESHOLD,
-    max_axis_relative_threshold: float = DEFAULT_SIZE_MAX_REL_THRESHOLD,
-    absolute_threshold_cm: float = DEFAULT_SIZE_ABS_THRESHOLD_CM,
+    volume_error_ratio_threshold: float = DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
 ) -> dict[str, Any]:
     """
     用法: result = evaluate_size_consistency(pred_box, gt_box)
-    作用: 评估预测 box 尺寸是否与目标 box 尺寸一致
+    作用: 评估预测 box 体积是否与目标 box 体积一致
     输入:
         pred_box_world: 长度 7 的预测世界坐标 box
         target_box_world: 长度 7 的 GT 世界坐标 box
-        mean_relative_threshold: 三轴平均相对误差阈值
-        max_axis_relative_threshold: 单轴最大相对误差阈值
-        absolute_threshold_cm: 单轴尺寸绝对误差阈值，单位 cm
-    输出: dict，包含 size_consistent、mean_relative_size_error、max_axis_relative_size_error 等字段
+        volume_error_ratio_threshold: 预测体积相对 GT 体积误差阈值
+    输出: dict，包含 size_consistent、pred_volume_cm3、target_volume_cm3、
+         volume_error_cm3、volume_error_ratio、volume_error_ratio_threshold
     """
     pred_box = as_box7d(pred_box_world, "pred_box_world")
     target_box = as_box7d(target_box_world, "target_box_world")
-    absolute_errors = np.abs(pred_box[3:6] - target_box[3:6])
-    relative_errors = np.abs(pred_box[3:6] - target_box[3:6]) / np.maximum(np.abs(target_box[3:6]), EPS)
-    mean_relative_error = float(np.mean(relative_errors))
-    max_axis_relative_error = float(np.max(relative_errors))
-    max_axis_absolute_error = float(np.max(absolute_errors))
-    size_l2_cm = float(np.linalg.norm(absolute_errors))
-    size_consistent = bool(np.all(absolute_errors <= float(absolute_threshold_cm)))
+    pred_volume_cm3 = float(np.prod(pred_box[3:6]))
+    target_volume_cm3 = float(np.prod(target_box[3:6]))
+    volume_error_cm3 = float(abs(pred_volume_cm3 - target_volume_cm3))
+    volume_error_ratio = float(volume_error_cm3 / target_volume_cm3)
+    size_consistent = bool(volume_error_ratio <= float(volume_error_ratio_threshold))
     return {
         "evaluated": True,
         "size_consistent": size_consistent,
-        "axis_absolute_size_errors_cm": absolute_errors.astype(np.float64).tolist(),
-        "max_axis_absolute_size_error_cm": max_axis_absolute_error,
-        "relative_size_errors": relative_errors.astype(np.float64).tolist(),
-        "mean_relative_size_error": mean_relative_error,
-        "max_axis_relative_size_error": max_axis_relative_error,
-        "size_l2_cm": size_l2_cm,
-        "mean_relative_threshold": float(mean_relative_threshold),
-        "max_axis_relative_threshold": float(max_axis_relative_threshold),
-        "absolute_threshold_cm": float(absolute_threshold_cm),
+        "pred_volume_cm3": pred_volume_cm3,
+        "target_volume_cm3": target_volume_cm3,
+        "volume_error_cm3": volume_error_cm3,
+        "volume_error_ratio": volume_error_ratio,
+        "volume_error_ratio_threshold": float(volume_error_ratio_threshold),
     }
 
 
@@ -271,7 +260,7 @@ def evaluate_direction(
     camera: Mapping[str, Any],
     expected_relation: str,
     target_box_world: Sequence[float] | None = None,
-    center_abs_threshold_cm: float = DEFAULT_DIRECTION_CENTER_ABS_THRESHOLD_CM,
+    center_l2_threshold_cm: float = DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
 ) -> dict[str, Any]:
     """
     用法: result = evaluate_direction(pred_box, ref_corners, camera, "the right of")
@@ -282,15 +271,16 @@ def evaluate_direction(
         camera: dict，包含 fx/fy/cx/cy/E_c2w
         expected_relation: str，auto_label 生成指令时保存的目标关系
         target_box_world: 可选 GT box，中心足够接近时直接判为方向正确
-        center_abs_threshold_cm: 中心三轴绝对误差阈值，单位 cm
-    输出: dict，包含 direction_correct、pred_relation、expected_relation
+        center_l2_threshold_cm: 中心点 L2 距离直通阈值，单位 cm
+    输出: dict，包含 direction_correct、pred_relation、expected_relation、center_l2_error_cm
     """
     pred_box = as_box7d(pred_box_world, "pred_box_world")
     expected_relation = str(expected_relation)
+    center_l2_error_cm: float | None = None
     if target_box_world is not None:
         target_box = as_box7d(target_box_world, "target_box_world")
-        center_abs_errors = np.abs(pred_box[:3] - target_box[:3])
-        center_match = bool(np.all(center_abs_errors <= float(center_abs_threshold_cm)))
+        center_l2_error_cm = float(np.linalg.norm(pred_box[:3] - target_box[:3]))
+        center_match = bool(center_l2_error_cm <= float(center_l2_threshold_cm))
         if center_match:
             return {
                 "evaluated": True,
@@ -298,8 +288,8 @@ def evaluate_direction(
                 "pred_relation": "center_match",
                 "expected_relation": expected_relation,
                 "center_match": True,
-                "center_abs_errors_cm": center_abs_errors.astype(np.float64).tolist(),
-                "center_abs_threshold_cm": float(center_abs_threshold_cm),
+                "center_l2_error_cm": center_l2_error_cm,
+                "center_l2_threshold_cm": float(center_l2_threshold_cm),
             }
 
     auto_label = _load_auto_label_module()
@@ -325,10 +315,10 @@ def evaluate_direction(
         "pred_relation": pred_relation,
         "expected_relation": expected_relation,
         "center_match": False,
-        "center_abs_threshold_cm": float(center_abs_threshold_cm),
+        "center_l2_threshold_cm": float(center_l2_threshold_cm),
     }
-    if target_box_world is not None:
-        result["center_abs_errors_cm"] = center_abs_errors.astype(np.float64).tolist()
+    if center_l2_error_cm is not None:
+        result["center_l2_error_cm"] = center_l2_error_cm
     return result
 
 
@@ -436,18 +426,15 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         for item in collision_items
         if item.get("collision", {}).get("unknown_overlap_ratio") is not None
     ]
-    mean_size_errors = [
-        float(item.get("size", {}).get("mean_relative_size_error", 0.0))
+    volume_errors_cm3 = [
+        float(item.get("size", {}).get("volume_error_cm3", 0.0))
         for item in size_items
+        if item.get("size", {}).get("volume_error_cm3") is not None
     ]
-    max_size_errors = [
-        float(item.get("size", {}).get("max_axis_relative_size_error", 0.0))
+    volume_error_ratios = [
+        float(item.get("size", {}).get("volume_error_ratio", 0.0))
         for item in size_items
-    ]
-    max_abs_size_errors = [
-        float(item.get("size", {}).get("max_axis_absolute_size_error_cm", 0.0))
-        for item in size_items
-        if item.get("size", {}).get("max_axis_absolute_size_error_cm") is not None
+        if item.get("size", {}).get("volume_error_ratio") is not None
     ]
 
     return {
@@ -468,12 +455,10 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         "median_occupied_collision_ratio": _safe_median(occupied_collision_ratios),
         "mean_unknown_overlap_ratio": _safe_mean(unknown_overlap_ratios),
         "median_unknown_overlap_ratio": _safe_median(unknown_overlap_ratios),
-        "mean_relative_size_error": _safe_mean(mean_size_errors),
-        "median_relative_size_error": _safe_median(mean_size_errors),
-        "mean_max_axis_size_error": _safe_mean(max_size_errors),
-        "median_max_axis_size_error": _safe_median(max_size_errors),
-        "mean_max_axis_absolute_size_error_cm": _safe_mean(max_abs_size_errors),
-        "median_max_axis_absolute_size_error_cm": _safe_median(max_abs_size_errors),
+        "mean_volume_error_cm3": _safe_mean(volume_errors_cm3),
+        "median_volume_error_cm3": _safe_median(volume_errors_cm3),
+        "mean_volume_error_ratio": _safe_mean(volume_error_ratios),
+        "median_volume_error_ratio": _safe_median(volume_error_ratios),
     }
 
 

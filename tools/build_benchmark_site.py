@@ -272,19 +272,25 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "vis_path": path_to_record(image_path),
         "rgb_path": str(prediction.get("rgb_path", "")),
         "has_image": image_path.exists(),
+        "full_metric_evaluated": bool(status.get("full_metric_evaluated")),
         "placement_success": bool(status.get("placement_success")),
         "collision_evaluated": bool(status.get("collision_evaluated")),
         "collision_free": bool(collision.get("collision_free")),
         "occupied_collision_ratio": collision.get("occupied_collision_ratio"),
         "unknown_overlap_ratio": collision.get("unknown_overlap_ratio"),
+        "collision_ratio_threshold": collision.get("collision_ratio_threshold"),
         "direction_evaluated": bool(status.get("direction_evaluated")),
         "direction_correct": bool(direction.get("direction_correct")),
+        "center_match": bool(direction.get("center_match")),
+        "center_l2_error_cm": direction.get("center_l2_error_cm"),
+        "center_l2_threshold_cm": direction.get("center_l2_threshold_cm"),
         "size_evaluated": bool(status.get("size_evaluated")),
         "size_consistent": bool(size.get("size_consistent")),
-        "mean_relative_size_error": size.get("mean_relative_size_error"),
-        "max_axis_relative_size_error": size.get("max_axis_relative_size_error"),
-        "max_axis_absolute_size_error_cm": size.get("max_axis_absolute_size_error_cm"),
-        "size_l2_cm": size.get("size_l2_cm"),
+        "pred_volume_cm3": size.get("pred_volume_cm3"),
+        "target_volume_cm3": size.get("target_volume_cm3"),
+        "volume_error_cm3": size.get("volume_error_cm3"),
+        "volume_error_ratio": size.get("volume_error_ratio"),
+        "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
         "pred_box_world": prediction.get("pred_box_world", []),
         "gt_box_world": prediction.get("gt_box_world", []),
         "errors": [str(error) for error in errors],
@@ -426,7 +432,7 @@ def render_html(title: str) -> str:
             <option value="failed">失败</option>
             <option value="collision_failed">碰撞失败</option>
             <option value="direction_wrong">方向错误</option>
-            <option value="size_inconsistent">尺寸不一致</option>
+            <option value="size_inconsistent">体积不一致</option>
             <option value="missing_image">缺失图片</option>
           </select>
         </label>
@@ -436,7 +442,8 @@ def render_html(title: str) -> str:
             <option value="default">默认顺序</option>
             <option value="failed_first">失败优先</option>
             <option value="collision_desc">碰撞率从高到低</option>
-            <option value="size_error_desc">尺寸误差从高到低</option>
+            <option value="direction_desc">方向 L2 误差从高到低</option>
+            <option value="size_error_desc">体积相对误差从高到低</option>
             <option value="source">数据源</option>
           </select>
         </label>
@@ -784,22 +791,6 @@ select {
   background: var(--paper-soft);
 }
 
-.mini-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.mini-metrics strong {
-  display: block;
-  margin-bottom: 2px;
-  color: var(--ink);
-  font-size: 13px;
-}
-
 .relation {
   margin-top: 10px;
   color: var(--muted);
@@ -982,6 +973,23 @@ const formatNumber = (value, digits = 4) => {
   return value.toFixed(digits);
 };
 
+const formatCm = (value, digits = 2) => {
+  if (typeof value !== "number" || Number.isNaN(value)) return "N/A";
+  return `${value.toFixed(digits)} cm`;
+};
+
+const formatMetricPair = (value, threshold, formatter) => {
+  const valueText = formatter(value);
+  const thresholdText = formatter(threshold);
+  if (valueText === "N/A" && thresholdText === "N/A") return "N/A";
+  return `${valueText} / ${thresholdText}`;
+};
+
+const metricState = (evaluated, passed) => {
+  if (!evaluated) return { text: "not eval", kind: "neutral" };
+  return passed ? { text: "pass", kind: "good" } : { text: "fail", kind: "bad" };
+};
+
 const searchableText = (item) => [
   item.sample_id,
   item.source_name,
@@ -1011,8 +1019,10 @@ const sortItems = (list, mode) => {
     sorted.sort((a, b) => Number(a.placement_success) - Number(b.placement_success) || a.index - b.index);
   } else if (mode === "collision_desc") {
     sorted.sort((a, b) => num(b.occupied_collision_ratio) - num(a.occupied_collision_ratio));
+  } else if (mode === "direction_desc") {
+    sorted.sort((a, b) => num(b.center_l2_error_cm) - num(a.center_l2_error_cm));
   } else if (mode === "size_error_desc") {
-    sorted.sort((a, b) => num(b.max_axis_absolute_size_error_cm) - num(a.max_axis_absolute_size_error_cm));
+    sorted.sort((a, b) => num(b.volume_error_ratio) - num(a.volume_error_ratio));
   } else if (mode === "source") {
     sorted.sort((a, b) => `${a.source_name} ${a.sample_id}`.localeCompare(`${b.source_name} ${b.sample_id}`));
   }
@@ -1021,12 +1031,34 @@ const sortItems = (list, mode) => {
 
 const makeBadge = (text, kind) => `<span class="badge ${kind}">${text}</span>`;
 
+const makeMetricBadge = (label, evaluated, passed, detailText) => {
+  const state = metricState(evaluated, passed);
+  const suffix = detailText && detailText !== "N/A" ? ` ${detailText}` : "";
+  return makeBadge(`${label} ${state.text}${suffix}`, state.kind);
+};
+
 const renderBadges = (item) => {
   const badges = [];
-  badges.push(makeBadge(item.placement_success ? "success" : "failed", item.placement_success ? "good" : "bad"));
-  badges.push(makeBadge(item.collision_free ? "collision ok" : "collision fail", item.collision_free ? "good" : "bad"));
-  badges.push(makeBadge(item.direction_correct ? "direction ok" : "direction wrong", item.direction_correct ? "good" : "warn"));
-  badges.push(makeBadge(item.size_consistent ? "size ok" : "size bad", item.size_consistent ? "good" : "warn"));
+  const placementState = metricState(item.full_metric_evaluated, item.placement_success);
+  badges.push(makeBadge(`success ${placementState.text}`, placementState.kind));
+  badges.push(makeMetricBadge(
+    "collision",
+    item.collision_evaluated,
+    item.collision_free,
+    formatMetricPair(item.occupied_collision_ratio, item.collision_ratio_threshold, (value) => formatPercent(value)),
+  ));
+  badges.push(makeMetricBadge(
+    "direction",
+    item.direction_evaluated,
+    item.direction_correct,
+    formatMetricPair(item.center_l2_error_cm, item.center_l2_threshold_cm, (value) => formatCm(value, 2)),
+  ));
+  badges.push(makeMetricBadge(
+    "size",
+    item.size_evaluated,
+    item.size_consistent,
+    formatMetricPair(item.volume_error_ratio, item.volume_error_ratio_threshold, (value) => formatPercent(value)),
+  ));
   if (!item.has_image) badges.push(makeBadge("missing image", "bad"));
   return badges.join("");
 };
@@ -1038,7 +1070,7 @@ const renderSummary = () => {
     ["成功率", formatPercent(summary.placement_success_rate)],
     ["无碰撞率", formatPercent(summary.collision_free_rate)],
     ["方向正确率", formatPercent(summary.direction_correct_rate)],
-    ["尺寸一致率", formatPercent(summary.size_consistent_rate)],
+    ["体积一致率", formatPercent(summary.size_consistent_rate)],
     ["平均碰撞率", formatPercent(summary.mean_occupied_collision_ratio)],
   ];
   els.summaryCards.innerHTML = cards.map(([label, value]) => `
@@ -1087,7 +1119,7 @@ const renderViewStats = (list) => {
     <div class="stat-row"><span>成功</span><strong>${success} (${formatPercent(success / count)})</strong></div>
     <div class="stat-row"><span>碰撞失败</span><strong>${collisionFail}</strong></div>
     <div class="stat-row"><span>方向错误</span><strong>${directionWrong}</strong></div>
-    <div class="stat-row"><span>尺寸不一致</span><strong>${sizeBad}</strong></div>
+    <div class="stat-row"><span>体积不一致</span><strong>${sizeBad}</strong></div>
   `;
 };
 
@@ -1110,11 +1142,6 @@ const renderCard = (item) => {
       <div class="card-body">
         <h3 class="card-title">${item.sample_id}</h3>
         <div class="badges">${renderBadges(item)}</div>
-        <div class="mini-metrics">
-          <span><strong>${formatPercent(item.occupied_collision_ratio)}</strong>碰撞率</span>
-          <span><strong>${formatNumber(item.max_axis_absolute_size_error_cm, 2)}</strong>最大尺寸误差 cm</span>
-          <span><strong>${formatNumber(item.size_l2_cm, 2)}</strong>L2 cm</span>
-        </div>
         <div class="relation">${item.expected_relation || "N/A"} -> ${item.pred_relation || "N/A"}</div>
       </div>
     </article>
@@ -1133,13 +1160,25 @@ const openDialog = (item) => {
     ["object", item.object_id],
     ["reference object", item.reference_object_id],
     ["reference name", item.reference_name],
+    ["collision evaluated", item.collision_evaluated ? "yes" : "no"],
+    ["collision free", item.collision_free ? "yes" : "no"],
+    ["occupied collision ratio", formatPercent(item.occupied_collision_ratio)],
+    ["collision ratio threshold", formatPercent(item.collision_ratio_threshold)],
+    ["unknown overlap ratio", formatPercent(item.unknown_overlap_ratio)],
+    ["direction evaluated", item.direction_evaluated ? "yes" : "no"],
+    ["direction correct", item.direction_correct ? "yes" : "no"],
+    ["center match", item.center_match ? "yes" : "no"],
     ["expected relation", item.expected_relation],
     ["pred relation", item.pred_relation],
-    ["occupied collision ratio", formatPercent(item.occupied_collision_ratio)],
-    ["unknown overlap ratio", formatPercent(item.unknown_overlap_ratio)],
-    ["mean size error", formatPercent(item.mean_relative_size_error)],
-    ["max axis size error cm", formatNumber(item.max_axis_absolute_size_error_cm, 3)],
-    ["size L2 cm", formatNumber(item.size_l2_cm, 3)],
+    ["direction center L2 error cm", formatCm(item.center_l2_error_cm, 3)],
+    ["direction center L2 threshold cm", formatCm(item.center_l2_threshold_cm, 3)],
+    ["size evaluated", item.size_evaluated ? "yes" : "no"],
+    ["size consistent", item.size_consistent ? "yes" : "no"],
+    ["pred volume cm3", formatCm(item.pred_volume_cm3, 3)],
+    ["target volume cm3", formatCm(item.target_volume_cm3, 3)],
+    ["volume error cm3", formatCm(item.volume_error_cm3, 3)],
+    ["volume error ratio", formatPercent(item.volume_error_ratio)],
+    ["volume error ratio threshold", formatPercent(item.volume_error_ratio_threshold)],
     ["vis path", item.vis_path],
   ];
   els.dialogMetrics.innerHTML = fields.map(([key, value]) => `<dt>${key}</dt><dd>${value || "N/A"}</dd>`).join("");

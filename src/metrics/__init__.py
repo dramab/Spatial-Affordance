@@ -6,8 +6,8 @@ src/metrics
 
 from src.metrics.placement_eval import (
     DEFAULT_COLLISION_RATIO_THRESHOLD,
-    DEFAULT_SIZE_MAX_REL_THRESHOLD,
-    DEFAULT_SIZE_MEAN_REL_THRESHOLD,
+    DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
+    DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
     box7d_to_occupancy_voxels,
     evaluate_collision,
     evaluate_direction,
@@ -20,8 +20,8 @@ from src.metrics.placement_eval import (
 
 __all__ = [
     "DEFAULT_COLLISION_RATIO_THRESHOLD",
-    "DEFAULT_SIZE_MAX_REL_THRESHOLD",
-    "DEFAULT_SIZE_MEAN_REL_THRESHOLD",
+    "DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM",
+    "DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD",
     "box7d_to_occupancy_voxels",
     "evaluate_collision",
     "evaluate_direction",

@@ -1,4 +1,4 @@
-model_config_path: configs/base/model_ptv3.yaml
+model_config_path: configs/base/model_textLen128_9_9_out512.yaml
 
 dataset:
   annotation_dir: data/annotations/placement_multimodal_simple
@@ -38,7 +38,7 @@ train:
   device: cuda
   seed: 42
   log_interval: 10
-  output_dir: outputs/model_ptv3_2
+  output_dir: outputs/model_voxel_2
   use_amp: false
   cudnn_benchmark: true
 

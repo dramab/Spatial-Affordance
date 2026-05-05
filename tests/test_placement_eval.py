@@ -6,12 +6,12 @@ tests/test_placement_eval.py
 测试内容：
 - test_evaluate_collision_ignores_two_support_layers_from_gt：
   验证碰撞评测可按 GT 最低体素层忽略两层桌面 occupied
-- test_evaluate_collision_requires_zero_non_support_occupied：
-  验证忽略支撑层后仍有任意 occupied 即碰撞失败
+- test_evaluate_collision_uses_ratio_threshold_after_support_ignore：
+  验证忽略支撑层后按 occupied collision ratio 阈值判定碰撞
 - test_evaluate_collision_reports_unknown_overlap：
   验证 UNKNOWN 体素只记录覆盖比例，不按碰撞失败处理
 - test_evaluate_size_consistency_thresholds：
-  验证尺寸一致性阈值
+  验证体积相对误差阈值
 - test_evaluate_direction_matches_auto_label_relation：
   验证方向 metric 复用 auto_label 空间关系逻辑
 - test_summarize_metric_records_reports_rates：
@@ -98,9 +98,9 @@ def test_evaluate_collision_ignores_two_support_layers_from_gt():
     assert result["occupied_collision_ratio"] == 0.0
 
 
-def test_evaluate_collision_requires_zero_non_support_occupied():
+def test_evaluate_collision_uses_ratio_threshold_after_support_ignore():
     """
-    作用：验证桌面支撑层之外只要存在 OCCUPIED，碰撞即失败。
+    作用：验证桌面支撑层之外的 OCCUPIED 会按碰撞比例阈值决定是否失败。
 
     输入：
         无，内部构造预测框、GT 框和 occupancy grid
@@ -114,20 +114,35 @@ def test_evaluate_collision_requires_zero_non_support_occupied():
     grid[2, 2, 1] = OCCUPIED
     grid[2, 2, 2] = OCCUPIED
 
-    result = evaluate_collision(
+    pass_result = evaluate_collision(
         pred_box,
         grid,
         voxel_params,
-        collision_ratio_threshold=1.0,
+        collision_ratio_threshold=0.1,
+        target_box_world=gt_box,
+        support_ignore_layers=2,
+    )
+    fail_result = evaluate_collision(
+        pred_box,
+        grid,
+        voxel_params,
+        collision_ratio_threshold=0.01,
         target_box_world=gt_box,
         support_ignore_layers=2,
     )
 
-    assert result["evaluated"] is True
-    assert result["collision_free"] is False
-    assert result["occupied_voxel_count"] == 1
-    assert result["ignored_support_occupied_count"] == 2
-    assert result["occupied_collision_ratio"] > 0.0
+    assert pass_result["evaluated"] is True
+    assert pass_result["collision_free"] is True
+    assert pass_result["occupied_voxel_count"] == 1
+    assert pass_result["ignored_support_occupied_count"] == 2
+    assert pass_result["occupied_collision_ratio"] > 0.01
+    assert pass_result["occupied_collision_ratio"] <= 0.1
+
+    assert fail_result["evaluated"] is True
+    assert fail_result["collision_free"] is False
+    assert fail_result["occupied_voxel_count"] == 1
+    assert fail_result["ignored_support_occupied_count"] == 2
+    assert fail_result["occupied_collision_ratio"] == pass_result["occupied_collision_ratio"]
 
 
 def test_evaluate_collision_reports_unknown_overlap():
@@ -154,7 +169,7 @@ def test_evaluate_collision_reports_unknown_overlap():
 
 def test_evaluate_size_consistency_thresholds():
     """
-    作用：验证尺寸一致性按单轴绝对误差阈值判断。
+    作用：验证尺寸一致性按体积相对误差阈值判断。
 
     输入：
         无，内部构造预测和 GT box
@@ -162,16 +177,18 @@ def test_evaluate_size_consistency_thresholds():
         无，通过断言验证结果
     """
     gt_box = [0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 0.0]
-    good_pred = [0.0, 0.0, 0.0, 12.0, 18.0, 31.5, 0.0]
-    bad_pred = [0.0, 0.0, 0.0, 12.1, 20.0, 30.0, 0.0]
+    good_pred = [0.0, 0.0, 0.0, 11.0, 20.0, 30.0, 0.0]
+    bad_pred = [0.0, 0.0, 0.0, 13.0, 20.0, 30.0, 0.0]
 
-    good = evaluate_size_consistency(good_pred, gt_box, absolute_threshold_cm=2.0)
-    bad = evaluate_size_consistency(bad_pred, gt_box, absolute_threshold_cm=2.0)
+    good = evaluate_size_consistency(good_pred, gt_box, volume_error_ratio_threshold=0.15)
+    bad = evaluate_size_consistency(bad_pred, gt_box, volume_error_ratio_threshold=0.15)
 
     assert good["size_consistent"] is True
     assert bad["size_consistent"] is False
-    assert good["max_axis_absolute_size_error_cm"] == 2.0
-    assert bad["max_axis_absolute_size_error_cm"] > bad["absolute_threshold_cm"]
+    assert np.isclose(good["pred_volume_cm3"], 6600.0)
+    assert np.isclose(good["target_volume_cm3"], 6000.0)
+    assert np.isclose(good["volume_error_ratio"], 0.1)
+    assert bad["volume_error_ratio"] > bad["volume_error_ratio_threshold"]
 
 
 def test_evaluate_direction_matches_auto_label_relation():
@@ -231,7 +248,7 @@ def test_evaluate_direction_accepts_close_center_before_relation():
         camera=camera,
         expected_relation="behind",
         target_box_world=gt_box,
-        center_abs_threshold_cm=1.0,
+        center_l2_threshold_cm=1.0,
     )
 
     assert result["evaluated"] is True
@@ -256,7 +273,12 @@ def test_summarize_metric_records_reports_rates():
         "unknown_overlap_ratio": 0.0,
     }
     first_direction = {"evaluated": True, "direction_correct": True}
-    first_size = {"evaluated": True, "size_consistent": True, "mean_relative_size_error": 0.05, "max_axis_relative_size_error": 0.08}
+    first_size = {
+        "evaluated": True,
+        "size_consistent": True,
+        "volume_error_cm3": 300.0,
+        "volume_error_ratio": 0.05,
+    }
     second_collision = {
         "evaluated": True,
         "collision_free": False,
@@ -264,7 +286,12 @@ def test_summarize_metric_records_reports_rates():
         "unknown_overlap_ratio": 0.1,
     }
     second_direction = {"evaluated": True, "direction_correct": False}
-    second_size = {"evaluated": True, "size_consistent": True, "mean_relative_size_error": 0.02, "max_axis_relative_size_error": 0.04}
+    second_size = {
+        "evaluated": True,
+        "size_consistent": True,
+        "volume_error_cm3": 120.0,
+        "volume_error_ratio": 0.02,
+    }
     records = [
         {
             "source_name": "demo",
@@ -292,3 +319,5 @@ def test_summarize_metric_records_reports_rates():
     assert summary["size_consistent_rate"] == 1.0
     assert np.isclose(summary["mean_occupied_collision_ratio"], 0.1)
     assert np.isclose(summary["mean_unknown_overlap_ratio"], 0.05)
+    assert np.isclose(summary["mean_volume_error_cm3"], 210.0)
+    assert np.isclose(summary["mean_volume_error_ratio"], 0.035)
