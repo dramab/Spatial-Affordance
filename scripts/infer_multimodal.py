@@ -15,7 +15,8 @@ scripts/infer_multimodal.py
     - 从 checkpoint 读取模型配置与训练时的数据集配置
     - 复用 PlacementMultimodalDataset/placement_multimodal_collate_fn 执行推理
     - 将 pred_boxes_norm 恢复为世界坐标系 7D box，尺寸通道按 log(size_norm) 处理
-    - 将预测 3D box 投影回 annotation.rgb_path 对应的原尺寸图片
+    - 将 pred_object_centers_norm 恢复为世界坐标系移动前物体中心
+    - 将预测放置 3D box 与预测移动前物体中心点投影回 annotation.rgb_path 对应的原尺寸图片
     - 导出 predictions.json 与逐样本可视化图片
 
 输入：
@@ -66,7 +67,9 @@ from src.utils.coord_utils import box7d_to_corners_world, project_world, wrap_ya
 
 SCHEMA_VERSION = "multimodal_inference_predictions/v1"
 COLOR_PREDICTION = (0, 191, 255)
+COLOR_OBJECT_CENTER = (255, 128, 0)
 LINE_WIDTH_PREDICTION = 4
+OBJECT_CENTER_RADIUS = 6
 BOX_EDGES = [
     (0, 1), (2, 3), (4, 5), (6, 7),
     (0, 2), (1, 3), (4, 6), (5, 7),
@@ -206,6 +209,23 @@ def squeeze_single_query_boxes(pred_boxes_norm: torch.Tensor) -> torch.Tensor:
     )
 
 
+def squeeze_single_query_centers(pred_centers_norm: torch.Tensor) -> torch.Tensor:
+    """
+    用法: centers = squeeze_single_query_centers(outputs["pred_object_centers_norm"])
+    作用: 将单 query 预测中心统一整理为 (B, 3)
+    输入: pred_centers_norm: Tensor(B, 3) 或 Tensor(B, 1, 3)
+    输出: Tensor(B, 3)，压缩后的预测中心
+    """
+    if pred_centers_norm.ndim == 2 and pred_centers_norm.shape[-1] == 3:
+        return pred_centers_norm
+    if pred_centers_norm.ndim == 3 and pred_centers_norm.shape[1] == 1 and pred_centers_norm.shape[2] == 3:
+        return pred_centers_norm[:, 0, :]
+    raise ValueError(
+        "infer_multimodal.py 当前仅支持单 query center 输出，"
+        f"got pred_object_centers_norm shape={tuple(pred_centers_norm.shape)}"
+    )
+
+
 def resolve_configs_from_checkpoint(
         checkpoint: dict[str, Any],
         annotation_dir_override: Path | None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -225,7 +245,7 @@ def resolve_configs_from_checkpoint(
     dataloader_cfg = dict(train_cfg.get("dataloader") or {})
     if annotation_dir_override is not None:
         dataset_cfg["annotation_dir"] = annotation_dir_override.as_posix()
-    dataset_cfg.setdefault("annotation_dir", "data/annotations/placement_multimodal")
+    dataset_cfg.setdefault("annotation_dir", "data/annotations/placement_multimodal_v2")
     dataset_cfg.setdefault("prompt_key", "polished_prompt")
     dataset_cfg.setdefault("image_size", [480, 640])
     dataset_cfg.setdefault("scale_eps", 1.0e-6)
@@ -243,7 +263,7 @@ def build_dataset(dataset_cfg: dict[str, Any], split: str) -> PlacementMultimoda
     """
     image_size = tuple(int(v) for v in dataset_cfg.get("image_size", (480, 640)))
     return PlacementMultimodalDataset(
-        annotation_dir=resolve_project_path(dataset_cfg.get("annotation_dir", "data/annotations/placement_multimodal")),
+        annotation_dir=resolve_project_path(dataset_cfg.get("annotation_dir", "data/annotations/placement_multimodal_v2")),
         split=split,
         prompt_key=str(dataset_cfg.get("prompt_key", "polished_prompt")),
         image_size=image_size,
@@ -326,6 +346,22 @@ def denormalize_world_box(
     return box_world
 
 
+def denormalize_world_center(
+        center_norm: np.ndarray,
+        scene_center: np.ndarray,
+        scene_scale: float) -> np.ndarray:
+    """
+    用法: center_world = denormalize_world_center(center_norm, scene_center, scene_scale)
+    作用: 将归一化 3D center 恢复为世界坐标
+    输入: center_norm: (3,)；scene_center: (3,)；scene_scale: float
+    输出: ndarray(3,)，世界坐标系中心
+    """
+    center_norm = np.asarray(center_norm, dtype=np.float64)
+    if center_norm.shape != (3,):
+        raise ValueError(f"center_norm must have shape (3,), got {center_norm.shape}")
+    return center_norm * float(scene_scale) + np.asarray(scene_center, dtype=np.float64)
+
+
 def make_camera_matrices(camera_dict: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     """
     用法: K, E_w2c = make_camera_matrices(camera_dict)
@@ -370,15 +406,50 @@ def draw_projected_bbox(
         )
 
 
+def draw_projected_point(
+        draw: ImageDraw.ImageDraw,
+        point_world: np.ndarray,
+        K: np.ndarray,
+        E_w2c: np.ndarray,
+        color: tuple[int, int, int],
+        radius: int) -> None:
+    """
+    用法: draw_projected_point(draw, center_world, K, E_w2c, (255, 128, 0), 6)
+    作用: 将 3D 世界坐标点投影到图像上并绘制粗圆点
+    输入: draw: ImageDraw.ImageDraw；point_world: (3,)；K/E_w2c: 相机矩阵；color: RGB；radius: 圆点半径
+    输出: None，点在相机后方时不绘制
+    """
+    point = np.asarray(point_world, dtype=np.float64)
+    if point.shape != (3,):
+        raise ValueError(f"point_world must have shape (3,), got {point.shape}")
+    uv, z_cam = project_world(point.reshape(1, 3), K, E_w2c)
+    if float(z_cam[0]) <= 0.0:
+        return
+
+    center_x = float(uv[0, 0])
+    center_y = float(uv[0, 1])
+    radius = max(1, int(radius))
+    draw.ellipse(
+        [
+            (center_x - radius, center_y - radius),
+            (center_x + radius, center_y + radius),
+        ],
+        fill=color,
+        outline=(0, 0, 0),
+        width=max(1, radius // 3),
+    )
+
+
 def save_prediction_visualization(
         rgb_path: Path,
         pred_box_world: np.ndarray,
+        pred_object_center_world: np.ndarray,
         camera_dict: dict[str, Any],
         output_path: Path) -> None:
     """
-    用法: save_prediction_visualization(rgb_path, pred_box_world, camera_dict, output_path)
-    作用: 将预测框投影到原图并保存
-    输入: rgb_path: Path；pred_box_world: (7,)；camera_dict: dict；output_path: Path
+    用法: save_prediction_visualization(rgb_path, pred_box_world, pred_object_center_world, camera_dict, output_path)
+    作用: 将预测放置框与预测移动前物体中心点投影到原图并保存
+    输入: rgb_path: Path；pred_box_world: (7,)；pred_object_center_world: (3,)；camera_dict: dict；output_path: Path
     输出: None，结果图写入 output_path
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +465,14 @@ def save_prediction_visualization(
             E_w2c=E_w2c,
             color=COLOR_PREDICTION,
             width=LINE_WIDTH_PREDICTION,
+        )
+        draw_projected_point(
+            draw=draw,
+            point_world=pred_object_center_world,
+            K=K,
+            E_w2c=E_w2c,
+            color=COLOR_OBJECT_CENTER,
+            radius=OBJECT_CENTER_RADIUS,
         )
         rgb_image.save(output_path)
 
@@ -479,6 +558,9 @@ def run_inference(args: argparse.Namespace) -> dict[str, Any]:
                 text_inputs=batch["text_inputs"],
             )
             pred_boxes_norm = squeeze_single_query_boxes(outputs["pred_boxes_norm"]).detach().cpu().numpy()
+            pred_object_centers_norm = squeeze_single_query_centers(
+                outputs["pred_object_centers_norm"]
+            ).detach().cpu().numpy()
             scene_centers = batch["norm_meta"]["scene_center"].detach().cpu().numpy()
             scene_scales = batch["norm_meta"]["scene_scale"].detach().cpu().numpy()
             yaw_scales = batch["norm_meta"]["yaw_scale"].detach().cpu().numpy()
@@ -491,12 +573,22 @@ def run_inference(args: argparse.Namespace) -> dict[str, Any]:
                     scene_scale=float(scene_scales[batch_idx]),
                     yaw_scale=float(yaw_scales[batch_idx]),
                 )
+                pred_object_center_world = denormalize_world_center(
+                    center_norm=pred_object_centers_norm[batch_idx],
+                    scene_center=scene_centers[batch_idx],
+                    scene_scale=float(scene_scales[batch_idx]),
+                )
                 gt_box_world = np.asarray(sample_meta["placement"]["target_box"], dtype=np.float64)
+                gt_object_center_world = np.asarray(
+                    sample_meta["placement"]["object_center"],
+                    dtype=np.float64,
+                )
                 rgb_path = resolve_project_path(sample_meta["rgb_path"])
                 vis_path = vis_dir / f"{sample_meta['source_name']}__{sample_id}.png"
                 save_prediction_visualization(
                     rgb_path=rgb_path,
                     pred_box_world=pred_box_world,
+                    pred_object_center_world=pred_object_center_world,
                     camera_dict=batch["cameras"][batch_idx],
                     output_path=vis_path,
                 )
@@ -507,6 +599,12 @@ def run_inference(args: argparse.Namespace) -> dict[str, Any]:
                     "pred_box_norm": np.asarray(pred_boxes_norm[batch_idx], dtype=np.float64).tolist(),
                     "pred_box_world": pred_box_world.tolist(),
                     "gt_box_world": gt_box_world.tolist(),
+                    "pred_object_center_norm": np.asarray(
+                        pred_object_centers_norm[batch_idx],
+                        dtype=np.float64,
+                    ).tolist(),
+                    "pred_object_center_world": pred_object_center_world.tolist(),
+                    "gt_object_center_world": gt_object_center_world.tolist(),
                     "vis_path": path_to_record(vis_path),
                 })
 

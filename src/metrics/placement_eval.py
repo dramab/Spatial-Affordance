@@ -7,10 +7,12 @@ src/metrics/placement_eval.py
 1. 预测 3D box 是否与上游 occupancy grid 中的 OCCUPIED 体素碰撞
 2. 预测放置方向是否符合结构化指令关系
 3. 预测 3D box 体积是否与目标物体体积一致
+4. 预测移动前物体中心是否接近 GT 中心
 
 用法：
     from src.metrics.placement_eval import (
         evaluate_collision,
+        evaluate_center_alignment,
         evaluate_direction,
         evaluate_size_consistency,
         summarize_metric_records,
@@ -63,6 +65,21 @@ def as_box7d(box_value: Sequence[float], name: str = "box") -> np.ndarray:
     if np.any(box[3:6] <= 0.0):
         raise ValueError(f"{name} size values must be positive, got {box[3:6].tolist()}")
     return box
+
+
+def as_center3d(center_value: Sequence[float], name: str = "center") -> np.ndarray:
+    """
+    用法: center = as_center3d(record["pred_object_center_world"], "pred_object_center_world")
+    作用: 将输入校验并转换为 3D center 数组
+    输入: center_value: 长度为 3 的数值序列；name: 报错时使用的字段名
+    输出: ndarray(3,)，格式为 [cx, cy, cz]
+    """
+    center = np.asarray(center_value, dtype=np.float64)
+    if center.shape != (3,):
+        raise ValueError(f"{name} must have shape (3,), got {center.shape}")
+    if not np.isfinite(center).all():
+        raise ValueError(f"{name} contains non-finite values")
+    return center
 
 
 def object_info_to_corners_world(obj: ObjectInfo) -> np.ndarray:
@@ -254,6 +271,28 @@ def evaluate_size_consistency(
     }
 
 
+def evaluate_center_alignment(
+    pred_center_world: Sequence[float],
+    target_center_world: Sequence[float],
+    center_l2_threshold_cm: float = DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
+) -> dict[str, Any]:
+    """
+    用法: result = evaluate_center_alignment(pred_center, gt_center, 10.0)
+    作用: 使用与放置中心直通逻辑一致的 L2 阈值评估 3D center 是否匹配
+    输入: pred_center_world/target_center_world: 长度 3 的世界坐标中心；center_l2_threshold_cm: 阈值
+    输出: dict，包含 center_match、center_l2_error_cm 与阈值
+    """
+    pred_center = as_center3d(pred_center_world, "pred_center_world")
+    target_center = as_center3d(target_center_world, "target_center_world")
+    center_l2_error_cm = float(np.linalg.norm(pred_center - target_center))
+    return {
+        "evaluated": True,
+        "center_match": bool(center_l2_error_cm <= float(center_l2_threshold_cm)),
+        "center_l2_error_cm": center_l2_error_cm,
+        "center_l2_threshold_cm": float(center_l2_threshold_cm),
+    }
+
+
 def evaluate_direction(
     pred_box_world: Sequence[float],
     reference_corners_world: np.ndarray,
@@ -326,28 +365,36 @@ def merge_sample_metric_status(
     collision: Mapping[str, Any] | None,
     direction: Mapping[str, Any] | None,
     size: Mapping[str, Any] | None,
+    object_center: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     用法: status = merge_sample_metric_status(collision, direction, size)
     作用: 合并三类 metric 的单样本通过状态
-    输入: collision/direction/size: 单项 metric 结果，允许 None 表示未评估
+    输入: collision/direction/size/object_center: 单项 metric 结果，允许 None 表示未评估
     输出: dict，包含 placement_success 与各项是否参与评估
     """
     collision_evaluated = bool(collision and collision.get("evaluated"))
     direction_evaluated = bool(direction and direction.get("evaluated"))
     size_evaluated = bool(size and size.get("evaluated"))
+    object_center_evaluated = bool(object_center and object_center.get("evaluated"))
     full_metric_evaluated = collision_evaluated and direction_evaluated and size_evaluated
     placement_success = (
         bool(collision and collision.get("collision_free"))
         and bool(direction and direction.get("direction_correct"))
         and bool(size and size.get("size_consistent"))
     )
+    object_center_success = bool(object_center and object_center.get("center_match"))
+    overall_metric_evaluated = full_metric_evaluated and object_center_evaluated
     return {
         "collision_evaluated": collision_evaluated,
         "direction_evaluated": direction_evaluated,
         "size_evaluated": size_evaluated,
+        "object_center_evaluated": object_center_evaluated,
         "full_metric_evaluated": full_metric_evaluated,
+        "overall_metric_evaluated": overall_metric_evaluated,
         "placement_success": bool(placement_success and full_metric_evaluated),
+        "object_center_success": bool(object_center_success and object_center_evaluated),
+        "overall_success": bool(placement_success and object_center_success and overall_metric_evaluated),
     }
 
 
@@ -398,7 +445,9 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
     collision_items = [item for item in records if item.get("status", {}).get("collision_evaluated")]
     direction_items = [item for item in records if item.get("status", {}).get("direction_evaluated")]
     size_items = [item for item in records if item.get("status", {}).get("size_evaluated")]
+    object_center_items = [item for item in records if item.get("status", {}).get("object_center_evaluated")]
     full_items = [item for item in records if item.get("status", {}).get("full_metric_evaluated")]
+    overall_items = [item for item in records if item.get("status", {}).get("overall_metric_evaluated")]
 
     collision_free_values = [
         bool(item.get("collision", {}).get("collision_free"))
@@ -415,6 +464,14 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
     placement_success_values = [
         bool(item.get("status", {}).get("placement_success"))
         for item in full_items
+    ]
+    object_center_match_values = [
+        bool(item.get("object_center", {}).get("center_match"))
+        for item in object_center_items
+    ]
+    overall_success_values = [
+        bool(item.get("status", {}).get("overall_success"))
+        for item in overall_items
     ]
     occupied_collision_ratios = [
         float(item.get("collision", {}).get("occupied_collision_ratio", 0.0))
@@ -436,21 +493,32 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         for item in size_items
         if item.get("size", {}).get("volume_error_ratio") is not None
     ]
+    object_center_l2_errors_cm = [
+        float(item.get("object_center", {}).get("center_l2_error_cm", 0.0))
+        for item in object_center_items
+        if item.get("object_center", {}).get("center_l2_error_cm") is not None
+    ]
 
     return {
         "sample_count": sample_count,
         "full_metric_count": len(full_items),
+        "overall_metric_count": len(overall_items),
         "collision_metric_count": len(collision_items),
         "direction_metric_count": len(direction_items),
         "size_metric_count": len(size_items),
+        "object_center_metric_count": len(object_center_items),
         "full_metric_coverage": None if sample_count == 0 else float(len(full_items) / sample_count),
+        "overall_metric_coverage": None if sample_count == 0 else float(len(overall_items) / sample_count),
         "collision_coverage": None if sample_count == 0 else float(len(collision_items) / sample_count),
         "direction_coverage": None if sample_count == 0 else float(len(direction_items) / sample_count),
         "size_coverage": None if sample_count == 0 else float(len(size_items) / sample_count),
+        "object_center_coverage": None if sample_count == 0 else float(len(object_center_items) / sample_count),
         "placement_success_rate": _safe_rate(placement_success_values),
+        "overall_success_rate": _safe_rate(overall_success_values),
         "collision_free_rate": _safe_rate(collision_free_values),
         "direction_correct_rate": _safe_rate(direction_correct_values),
         "size_consistent_rate": _safe_rate(size_consistent_values),
+        "object_center_match_rate": _safe_rate(object_center_match_values),
         "mean_occupied_collision_ratio": _safe_mean(occupied_collision_ratios),
         "median_occupied_collision_ratio": _safe_median(occupied_collision_ratios),
         "mean_unknown_overlap_ratio": _safe_mean(unknown_overlap_ratios),
@@ -459,6 +527,8 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         "median_volume_error_cm3": _safe_median(volume_errors_cm3),
         "mean_volume_error_ratio": _safe_mean(volume_error_ratios),
         "median_volume_error_ratio": _safe_median(volume_error_ratios),
+        "mean_object_center_l2_error_cm": _safe_mean(object_center_l2_errors_cm),
+        "median_object_center_l2_error_cm": _safe_median(object_center_l2_errors_cm),
     }
 
 

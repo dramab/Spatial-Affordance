@@ -12,6 +12,8 @@ tests/test_placement_eval.py
   验证 UNKNOWN 体素只记录覆盖比例，不按碰撞失败处理
 - test_evaluate_size_consistency_thresholds：
   验证体积相对误差阈值
+- test_evaluate_center_alignment_uses_l2_threshold：
+  验证中心点评测复用 L2 阈值逻辑
 - test_evaluate_direction_matches_auto_label_relation：
   验证方向 metric 复用 auto_label 空间关系逻辑
 - test_summarize_metric_records_reports_rates：
@@ -28,6 +30,7 @@ import numpy as np
 from src.annotation.free_bbox.datatypes import ObjectInfo
 from src.annotation.free_bbox.occupancy import OCCUPIED, UNKNOWN
 from src.metrics.placement_eval import (
+    evaluate_center_alignment,
     evaluate_collision,
     evaluate_direction,
     evaluate_size_consistency,
@@ -191,6 +194,32 @@ def test_evaluate_size_consistency_thresholds():
     assert bad["volume_error_ratio"] > bad["volume_error_ratio_threshold"]
 
 
+def test_evaluate_center_alignment_uses_l2_threshold():
+    """
+    作用：验证移动前物体中心评测使用 L2 距离阈值。
+
+    输入：
+        无，内部构造预测中心和 GT 中心
+    输出：
+        无，通过断言验证中心匹配结果
+    """
+    good = evaluate_center_alignment(
+        pred_center_world=[1.0, 2.0, 3.0],
+        target_center_world=[1.0, 2.0, 3.5],
+        center_l2_threshold_cm=1.0,
+    )
+    bad = evaluate_center_alignment(
+        pred_center_world=[1.0, 2.0, 3.0],
+        target_center_world=[1.0, 2.0, 5.0],
+        center_l2_threshold_cm=1.0,
+    )
+
+    assert good["evaluated"] is True
+    assert good["center_match"] is True
+    assert np.isclose(good["center_l2_error_cm"], 0.5)
+    assert bad["center_match"] is False
+
+
 def test_evaluate_direction_matches_auto_label_relation():
     """
     作用：验证方向 metric 会按 auto_label 关系逻辑判断预测位置。
@@ -279,6 +308,11 @@ def test_summarize_metric_records_reports_rates():
         "volume_error_cm3": 300.0,
         "volume_error_ratio": 0.05,
     }
+    first_object_center = {
+        "evaluated": True,
+        "center_match": True,
+        "center_l2_error_cm": 1.0,
+    }
     second_collision = {
         "evaluated": True,
         "collision_free": False,
@@ -292,20 +326,37 @@ def test_summarize_metric_records_reports_rates():
         "volume_error_cm3": 120.0,
         "volume_error_ratio": 0.02,
     }
+    second_object_center = {
+        "evaluated": True,
+        "center_match": False,
+        "center_l2_error_cm": 3.0,
+    }
     records = [
         {
             "source_name": "demo",
             "collision": first_collision,
             "direction": first_direction,
             "size": first_size,
-            "status": merge_sample_metric_status(first_collision, first_direction, first_size),
+            "object_center": first_object_center,
+            "status": merge_sample_metric_status(
+                first_collision,
+                first_direction,
+                first_size,
+                first_object_center,
+            ),
         },
         {
             "source_name": "demo",
             "collision": second_collision,
             "direction": second_direction,
             "size": second_size,
-            "status": merge_sample_metric_status(second_collision, second_direction, second_size),
+            "object_center": second_object_center,
+            "status": merge_sample_metric_status(
+                second_collision,
+                second_direction,
+                second_size,
+                second_object_center,
+            ),
         },
     ]
 
@@ -313,11 +364,15 @@ def test_summarize_metric_records_reports_rates():
 
     assert summary["sample_count"] == 2
     assert summary["full_metric_coverage"] == 1.0
+    assert summary["overall_metric_coverage"] == 1.0
     assert summary["placement_success_rate"] == 0.5
+    assert summary["overall_success_rate"] == 0.5
     assert summary["collision_free_rate"] == 0.5
     assert summary["direction_correct_rate"] == 0.5
     assert summary["size_consistent_rate"] == 1.0
+    assert summary["object_center_match_rate"] == 0.5
     assert np.isclose(summary["mean_occupied_collision_ratio"], 0.1)
     assert np.isclose(summary["mean_unknown_overlap_ratio"], 0.05)
     assert np.isclose(summary["mean_volume_error_cm3"], 210.0)
     assert np.isclose(summary["mean_volume_error_ratio"], 0.035)
+    assert np.isclose(summary["mean_object_center_l2_error_cm"], 2.0)

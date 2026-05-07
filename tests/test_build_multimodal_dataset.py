@@ -237,6 +237,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "object_id": "obj_0",
                     "class_name": "demo_class",
                     "canonical_aabb_object": [-1, -2, -3, 1, 2, 3],
+                    "original_pose_world": _make_transform((10.0, 20.0, 30.0)),
                     "transform_world": _make_yaw_transform((0, 0, 0), 15.0),
                     "center_world": [0, 0, 0],
                     "aabb_world": [-1, -2, -3, 1, 2, 3],
@@ -247,6 +248,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
                     "canonical_aabb_object": [-1, -2, -3, 1, 2, 3],
+                    "original_pose_world": _make_transform((11.0, 20.0, 30.0)),
                     "transform_world": _make_yaw_transform((1, 0, 0), 30.0),
                     "center_world": [1, 0, 0],
                     "aabb_world": [0, -2, -3, 2, 2, 3],
@@ -264,6 +266,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "scene_id": "scene01",
                     "frame_id": "000000",
                     "canonical_aabb_object": [-1, -2, -2, 1, 2, 2],
+                    "original_pose_world": _make_transform((0.0, 10.0, 0.0)),
                     "transform_world": _make_yaw_transform((0, 1, 0), 45.0),
                     "center_world": [0, 1, 0],
                     "aabb_world": [-1, -1, -2, 1, 3, 2],
@@ -274,6 +277,7 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
                     "scene_id": "scene01",
                     "frame_id": "000000",
                     "canonical_aabb_object": [-1, -2, -2, 1, 2, 2],
+                    "original_pose_world": _make_transform((0.0, 11.0, 0.0)),
                     "transform_world": _make_yaw_transform((0, 2, 0), 60.0),
                     "center_world": [0, 2, 0],
                     "aabb_world": [-1, 0, -2, 1, 4, 2],
@@ -376,8 +380,9 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
     assert sample["polished_prompt"].startswith("polished")
     assert sample["camera"]["img_w"] == 64
     assert len(sample["camera"]["E_c2w"]) == 4
-    assert sorted(sample["placement"].keys()) == ["target_box"]
+    assert sorted(sample["placement"].keys()) == ["object_center", "target_box"]
     assert len(sample["placement"]["target_box"]) == 7
+    assert len(sample["placement"]["object_center"]) == 3
     assert sample["placement"]["target_box"][-1] in {15.0, 30.0, 45.0, 60.0}
 
     samples_by_id = {
@@ -388,6 +393,11 @@ def test_build_dataset_aligns_modalities_and_writes_splits(tmp_path, monkeypatch
     assert np.allclose(
         samples_by_id["scene_0000_0000_obj_0_p000"]["placement"]["target_box"][3:6],
         [2.0, 4.0, 6.0],
+        atol=1e-6,
+    )
+    assert np.allclose(
+        samples_by_id["scene_0000_0000_obj_0_p000"]["placement"]["object_center"],
+        [10.0, 20.0, 30.0],
         atol=1e-6,
     )
     assert samples_by_id["scene_0000_0000_obj_0_p000"]["object_id"] == "obj_0"
@@ -434,6 +444,7 @@ def test_build_dataset_allows_missing_polished_label(tmp_path, monkeypatch):
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
                     "canonical_aabb_object": [-1, -1, -1, 1, 1, 1],
+                    "original_pose_world": _make_transform((0.5, 1.0, 1.5)),
                     "transform_world": _make_transform((0.0, 0.0, 0.0)),
                     "center_world": [0.0, 0.0, 0.0],
                     "aabb_world": [-1, -1, -1, 1, 1, 1],
@@ -474,6 +485,7 @@ def test_build_dataset_allows_missing_polished_label(tmp_path, monkeypatch):
     samples = [sample for payload in payloads for sample in payload["samples"]]
     assert samples[0]["prompt"] == "raw prompt"
     assert samples[0]["polished_prompt"] == ""
+    assert samples[0]["placement"]["object_center"] == [0.5, 1.0, 1.5]
 
 
 def test_build_dataset_raises_on_missing_grid_meta_camera(tmp_path, monkeypatch):
@@ -507,6 +519,7 @@ def test_build_dataset_raises_on_missing_grid_meta_camera(tmp_path, monkeypatch)
                     "scene_id": "scene_0000",
                     "frame_id": "0000",
                     "canonical_aabb_object": [-1, -1, -1, 1, 1, 1],
+                    "original_pose_world": _make_transform((0.0, 0.0, 0.0)),
                     "transform_world": _make_transform((0.0, 0.0, 0.0)),
                     "center_world": [0.0, 0.0, 0.0],
                     "aabb_world": [-1, -1, -1, 1, 1, 1],

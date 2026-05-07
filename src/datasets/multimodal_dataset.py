@@ -11,7 +11,7 @@ src/datasets/multimodal_dataset.py
     )
 
     dataset = PlacementMultimodalDataset(
-        annotation_dir="data/annotations/placement_multimodal",
+        annotation_dir="data/annotations/placement_multimodal_v2",
         split="train",
         max_points=65536,
     )
@@ -48,7 +48,7 @@ DEFAULT_IMAGE_SIZE = (480, 640)
 
 def _load_json(json_path: Path) -> dict[str, Any]:
     """
-    用法: payload = _load_json(Path("data/annotations/placement_multimodal/train.json"))
+    用法: payload = _load_json(Path("data/annotations/placement_multimodal_v2/train.json"))
     作用: 读取 JSON 标注文件
     输入: json_path: Path，JSON 文件路径
     输出: dict，解析后的 JSON 对象
@@ -167,6 +167,23 @@ def _normalize_box(
     box_norm[3:6] = np.log(box_norm[3:6])
     box_norm[6] = wrap_yaw_degrees(float(target_box[6])) / float(YAW_NORMALIZE_SCALE)
     return box_norm.astype(np.float32)
+
+
+def _normalize_center(
+        center_world: np.ndarray,
+        scene_center: np.ndarray,
+        scene_scale: float) -> np.ndarray:
+    """
+    用法: center_norm = _normalize_center(center_world, scene_center, scene_scale)
+    作用: 对世界坐标 3D center 做与 target_box 中心一致的归一化
+    输入: center_world: ndarray(3,)；scene_center: ndarray(3,)；scene_scale: float
+    输出: ndarray(3,)，归一化后的中心坐标
+    """
+    center_world = np.asarray(center_world, dtype=np.float64)
+    if center_world.shape != (3,):
+        raise ValueError(f"object_center must have shape (3,), got {center_world.shape}")
+    center_norm = (center_world - np.asarray(scene_center, dtype=np.float64)) / float(scene_scale)
+    return center_norm.astype(np.float32)
 
 
 def _build_stable_sample_seed(point_sample_seed: int, split: str, sample_id: str) -> int:
@@ -311,7 +328,7 @@ class PlacementMultimodalDataset(Dataset):
         用法: sample = dataset[0]
         作用: 读取并预处理单个多模态样本
         输入: index: int，样本索引
-        输出: dict，包含图像、归一化点云、文本、归一化 3D box 与归一化元信息
+        输出: dict，包含图像、归一化点云、文本、归一化 3D box、物体中心与归一化元信息
         """
         sample = self.samples[index]
         sample_id = str(sample["sample_id"])
@@ -349,6 +366,12 @@ class PlacementMultimodalDataset(Dataset):
             scene_center=scene_center,
             scene_scale=scene_scale,
         )
+        object_center = np.asarray(sample["placement"]["object_center"], dtype=np.float64)
+        object_center_norm = _normalize_center(
+            center_world=object_center,
+            scene_center=scene_center,
+            scene_scale=scene_scale,
+        )
 
         text_input = str(sample[self.prompt_key]).strip()
         if not text_input:
@@ -360,6 +383,7 @@ class PlacementMultimodalDataset(Dataset):
             "points_xyz_norm": torch.from_numpy(points_xyz_norm).to(torch.float32),
             "text_input": text_input,
             "target_box_norm": torch.from_numpy(target_box_norm).to(torch.float32),
+            "object_center_norm": torch.from_numpy(object_center_norm).to(torch.float32),
             "norm_meta": {
                 "scene_center": torch.from_numpy(scene_center.astype(np.float32)),
                 "scene_scale": torch.tensor(scene_scale, dtype=torch.float32),
@@ -376,7 +400,7 @@ def placement_multimodal_collate_fn(samples: list[dict[str, Any]]) -> dict[str, 
     用法: batch = placement_multimodal_collate_fn(samples)
     作用: 将单样本列表整理为可直接输入多模态模型的 batch
     输入: samples: list[dict]，Dataset 返回的样本列表
-    输出: dict，包含 images、points_xyz、text_inputs、target_boxes_norm 与归一化元信息
+    输出: dict，包含 images、points_xyz、text_inputs、target_boxes_norm、object_centers_norm 与归一化元信息
     """
     if not samples:
         raise ValueError("samples must not be empty")
@@ -388,6 +412,7 @@ def placement_multimodal_collate_fn(samples: list[dict[str, Any]]) -> dict[str, 
     images = torch.stack([sample["image"] for sample in samples], dim=0)
     points_xyz, point_counts = _pad_points_for_batch([sample["points_xyz_norm"] for sample in samples])
     target_boxes_norm = torch.stack([sample["target_box_norm"] for sample in samples], dim=0)
+    object_centers_norm = torch.stack([sample["object_center_norm"] for sample in samples], dim=0)
 
     return {
         "sample_ids": [sample["sample_id"] for sample in samples],
@@ -396,6 +421,7 @@ def placement_multimodal_collate_fn(samples: list[dict[str, Any]]) -> dict[str, 
         "point_counts": point_counts,
         "text_inputs": [sample["text_input"] for sample in samples],
         "target_boxes_norm": target_boxes_norm,
+        "object_centers_norm": object_centers_norm,
         "norm_meta": {
             "scene_center": torch.stack(
                 [sample["norm_meta"]["scene_center"] for sample in samples], dim=0),

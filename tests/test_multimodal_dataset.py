@@ -129,6 +129,11 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "out_dim": 7,
         },
+        "object_center_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 3,
+        },
     }
 
 
@@ -221,7 +226,7 @@ def _build_fake_multimodal_annotation_root(tmp_path: Path) -> Path:
     )
 
     train_payload = {
-        "schema_version": "placement_multimodal_dataset/v1",
+        "schema_version": "placement_multimodal_dataset/v2",
         "split": "train",
         "sample_count": 2,
         "samples": [
@@ -234,6 +239,7 @@ def _build_fake_multimodal_annotation_root(tmp_path: Path) -> Path:
                 "polished_prompt": "polished prompt a",
                 "placement": {
                     "target_box": [1.0, 2.0, 0.0, 2.0, 4.0, 6.0, 270.0],
+                    "object_center": [2.0, 4.0, 0.0],
                 },
                 "camera": {
                     "fx": 100.0,
@@ -254,6 +260,7 @@ def _build_fake_multimodal_annotation_root(tmp_path: Path) -> Path:
                 "polished_prompt": "polished prompt b",
                 "placement": {
                     "target_box": [2.5, 1.0, 1.0, 1.0, 1.0, 2.0, 90.0],
+                    "object_center": [1.0, 2.5, 1.0],
                 },
                 "camera": {
                     "fx": 120.0,
@@ -268,7 +275,7 @@ def _build_fake_multimodal_annotation_root(tmp_path: Path) -> Path:
         ],
     }
     test_payload = {
-        "schema_version": "placement_multimodal_dataset/v1",
+        "schema_version": "placement_multimodal_dataset/v2",
         "split": "test",
         "sample_count": 1,
         "samples": [train_payload["samples"][0]],
@@ -336,6 +343,7 @@ def test_multimodal_dataset_normalizes_points_and_box(tmp_path, monkeypatch):
         ],
         dtype=torch.float32,
     )
+    expected_object_center = torch.tensor([1.0 / 3.0, 2.0 / 3.0, 0.0], dtype=torch.float32)
 
     assert sample["sample_id"] == "sample_a"
     assert sample["image"].shape == (3, 480, 640)
@@ -343,6 +351,7 @@ def test_multimodal_dataset_normalizes_points_and_box(tmp_path, monkeypatch):
     assert torch.allclose(sample["norm_meta"]["scene_scale"], expected_scale, atol=1e-6)
     assert torch.allclose(sample["points_xyz_norm"], expected_points, atol=1e-6)
     assert torch.allclose(sample["target_box_norm"], expected_box, atol=1e-6)
+    assert torch.allclose(sample["object_center_norm"], expected_object_center, atol=1e-6)
     assert sample["text_input"] == "polished prompt a"
     assert "source_name" not in sample
     assert "target_box" not in sample
@@ -428,6 +437,7 @@ def test_multimodal_dataset_collate_batch_can_feed_model(tmp_path, monkeypatch):
     assert batch["images"].shape == (2, 3, 480, 640)
     assert batch["points_xyz"].shape == (2, 4, 3)
     assert batch["target_boxes_norm"].shape == (2, 7)
+    assert batch["object_centers_norm"].shape == (2, 3)
     assert torch.isnan(batch["points_xyz"][0, -1]).all()
     assert not torch.isnan(batch["points_xyz"][1]).any()
     assert batch["norm_meta"]["scene_center"].shape == (2, 3)
@@ -442,3 +452,4 @@ def test_multimodal_dataset_collate_batch_can_feed_model(tmp_path, monkeypatch):
     )
 
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)

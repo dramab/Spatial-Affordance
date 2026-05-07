@@ -246,7 +246,7 @@ def reduce_metric_sums(
     输入: metric_sums: Mapping[str, float]；sample_count: int；device: torch.device
     输出: tuple[dict[str, float], int]，聚合后的指标累加值与总样本数
     """
-    ordered_keys = ("loss", "center_loss", "size_loss", "yaw_loss")
+    ordered_keys = ("loss", "center_loss", "object_center_loss", "size_loss", "yaw_loss")
     payload = torch.tensor(
         [float(metric_sums[key]) for key in ordered_keys] + [float(sample_count)],
         dtype=torch.float64,
@@ -296,6 +296,7 @@ def run_one_epoch_distributed(
     metric_sums = {
         "loss": 0.0,
         "center_loss": 0.0,
+        "object_center_loss": 0.0,
         "size_loss": 0.0,
         "yaw_loss": 0.0,
     }
@@ -340,6 +341,8 @@ def run_one_epoch_distributed(
                 loss_dict = criterion(
                     pred_boxes_norm=outputs["pred_boxes_norm"],
                     target_boxes_norm=batch_inputs["target_boxes_norm"],
+                    pred_object_centers_norm=outputs["pred_object_centers_norm"],
+                    target_object_centers_norm=batch_inputs["object_centers_norm"],
                 )
                 loss = loss_dict["loss"]
 
@@ -496,10 +499,12 @@ def main() -> None:
         )
 
         model = MultimodalModel(model_cfg).to(device)
+        center_weight = float(loss_cfg.get("center_weight", 1.0))
         criterion = MultimodalBBoxLoss(
-            center_weight=float(loss_cfg.get("center_weight", 1.0)),
+            center_weight=center_weight,
             size_weight=float(loss_cfg.get("size_weight", 1.0)),
             yaw_weight=float(loss_cfg.get("yaw_weight", 0.5)),
+            object_center_weight=float(loss_cfg.get("object_center_weight", center_weight)),
             smooth_l1_beta=float(loss_cfg.get("smooth_l1_beta", 1.0)),
         )
         optimizer = single_train.create_optimizer(model, optimization_cfg)

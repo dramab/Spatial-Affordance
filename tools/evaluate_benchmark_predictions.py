@@ -14,7 +14,7 @@ tools/evaluate_benchmark_predictions.py
 作用:
     - 只读取 benchmark manifest、benchmark 内 occupancy grid 和 predictions.json
     - 不访问 annotation-dir、outputs-base、mapping 或原始数据集 adapter
-    - 计算 collision、direction、size 三类 metric 并导出 summary
+    - 计算 collision、direction、size、object_center 四类 metric 并导出 summary
 
 输入:
     --benchmark-dir: build_benchmark_manifest.py 生成的 benchmark 目录
@@ -53,6 +53,7 @@ from src.metrics.placement_eval import (
     DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
     DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
     DEFAULT_SUPPORT_IGNORE_LAYERS,
+    evaluate_center_alignment,
     evaluate_collision,
     evaluate_direction,
     evaluate_size_consistency,
@@ -199,6 +200,18 @@ def make_skip_result(reason: str) -> dict[str, Any]:
     return {"evaluated": False, "reason": str(reason)}
 
 
+def require_prediction_field(prediction: Mapping[str, Any], field_name: str) -> Any:
+    """
+    用法: value = require_prediction_field(prediction, "pred_object_center_world")
+    作用: 读取 prediction 必需字段，缺失时给出明确错误
+    输入: prediction: Mapping；field_name: str
+    输出: 任意字段值
+    """
+    if field_name not in prediction:
+        raise KeyError(f"missing prediction field: {field_name}")
+    return prediction[field_name]
+
+
 def load_occupancy_cached(
     cache: dict[str, np.ndarray],
     benchmark_dir: Path,
@@ -277,7 +290,22 @@ def evaluate_one_prediction(
         direction_result = make_skip_result(f"direction metric failed: {exc}")
         errors.append(str(exc))
 
-    status = merge_sample_metric_status(collision_result, direction_result, size_result)
+    try:
+        object_center_result = evaluate_center_alignment(
+            pred_center_world=require_prediction_field(prediction, "pred_object_center_world"),
+            target_center_world=benchmark_sample["object_center_world"],
+            center_l2_threshold_cm=args.direction_center_l2_threshold_cm,
+        )
+    except Exception as exc:
+        object_center_result = make_skip_result(f"object_center metric failed: {exc}")
+        errors.append(str(exc))
+
+    status = merge_sample_metric_status(
+        collision_result,
+        direction_result,
+        size_result,
+        object_center_result,
+    )
     return {
         "sample_id": sample_id,
         "source_name": source_name,
@@ -287,6 +315,7 @@ def evaluate_one_prediction(
         "collision": collision_result,
         "direction": direction_result,
         "size": size_result,
+        "object_center": object_center_result,
         "status": status,
         "errors": errors,
     }
@@ -324,12 +353,14 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "sample_id", "source_name", "scene_id", "frame_id", "object_id",
-        "placement_success", "collision_evaluated", "collision_free",
+        "placement_success", "overall_success", "collision_evaluated", "collision_free",
         "occupied_collision_ratio", "ignored_support_layers", "ignored_support_occupied_count",
         "direction_evaluated", "direction_correct", "center_match",
         "center_l2_error_cm", "center_l2_threshold_cm", "expected_relation", "pred_relation", "reference_object_id",
         "size_evaluated", "size_consistent", "pred_volume_cm3", "target_volume_cm3",
         "volume_error_cm3", "volume_error_ratio", "volume_error_ratio_threshold",
+        "object_center_evaluated", "object_center_match", "object_center_l2_error_cm",
+        "object_center_l2_threshold_cm",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -338,6 +369,7 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
             collision = record.get("collision", {})
             direction = record.get("direction", {})
             size = record.get("size", {})
+            object_center = record.get("object_center", {})
             status = record.get("status", {})
             writer.writerow({
                 "sample_id": record.get("sample_id"),
@@ -346,6 +378,7 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "frame_id": record.get("frame_id"),
                 "object_id": record.get("object_id"),
                 "placement_success": status.get("placement_success"),
+                "overall_success": status.get("overall_success"),
                 "collision_evaluated": collision.get("evaluated"),
                 "collision_free": collision.get("collision_free"),
                 "occupied_collision_ratio": collision.get("occupied_collision_ratio"),
@@ -366,6 +399,10 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "volume_error_cm3": size.get("volume_error_cm3"),
                 "volume_error_ratio": size.get("volume_error_ratio"),
                 "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
+                "object_center_evaluated": object_center.get("evaluated"),
+                "object_center_match": object_center.get("center_match"),
+                "object_center_l2_error_cm": object_center.get("center_l2_error_cm"),
+                "object_center_l2_threshold_cm": object_center.get("center_l2_threshold_cm"),
             })
 
 
@@ -416,6 +453,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             "support_ignore_layers": int(args.support_ignore_layers),
             "volume_error_ratio_threshold": float(args.volume_error_ratio_threshold),
             "direction_center_l2_threshold_cm": float(args.direction_center_l2_threshold_cm),
+            "object_center_l2_threshold_cm": float(args.direction_center_l2_threshold_cm),
         },
         "sample_count": len(per_sample_records),
         "summary": summarize_metric_records(per_sample_records),

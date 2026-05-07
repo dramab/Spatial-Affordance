@@ -10,7 +10,7 @@ tools/build_multimodal_dataset.py
         --rgb-dir outputs/placement_rgb_bbox_vis \
         --label-json outputs/auto_labels/all_labels_polished.json \
         --source-dirs outputs/hope outputs/housecat6d \
-        --output-dir data/annotations/placement_multimodal \
+        --output-dir data/annotations/placement_multimodal_v2 \
         --train-ratio 0.8 \
         --valid-ratio 0.1 \
         --seed 42
@@ -38,7 +38,7 @@ tools/build_multimodal_dataset.py
 
 使用示例:
     python tools/build_multimodal_dataset.py \
-        --output-dir data/annotations/placement_multimodal \
+        --output-dir data/annotations/placement_multimodal_v2 \
         --train-ratio 0.8 \
         --valid-ratio 0.1
 """
@@ -61,7 +61,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.annotation.bbox3d.bbox_utils import get_bbox_corners
 from src.utils.coord_utils import rotation_z_3x3, transform_points
 
-SCHEMA_VERSION = "placement_multimodal_dataset/v1"
+SCHEMA_VERSION = "placement_multimodal_dataset/v2"
 CAMERA_REQUIRED_KEYS = ("fx", "fy", "cx", "cy", "img_w", "img_h", "E_c2w")
 CAMERA_BACKFILL_HINT = (
     "请先运行 tools/backfill_placement_camera_meta.py 回填旧 placement 输出，"
@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/annotations/v1"),
+        default=Path("data/annotations/placement_multimodal_v2"),
         help="输出标注目录",
     )
     parser.add_argument(
@@ -455,16 +455,21 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     用法: placement = build_minimal_placement(sample_record)
     作用: 从原始 placement sample 中提取精简监督字段
     输入: record: Mapping[str, object]，原始 placement 样本
-    输出: dict，仅保留训练需要的目标框监督信息
+    输出: dict，仅保留训练需要的放置框与原始物体中心监督信息
     """
     center_world = np.asarray(record["center_world"], dtype=np.float64)
     canonical_aabb_object = np.asarray(record["canonical_aabb_object"], dtype=np.float64)
     yaw_degrees = float(record["yaw_degrees"])
     transform_world = np.asarray(record["transform_world"], dtype=np.float64)
+    original_pose_world = np.asarray(record["original_pose_world"], dtype=np.float64)
     box_size = compute_yaw_aligned_box_size(
         canonical_aabb_object=canonical_aabb_object,
         transform_world=transform_world,
         yaw_degrees=yaw_degrees,
+    )
+    object_center = compute_original_object_center(
+        canonical_aabb_object=canonical_aabb_object,
+        original_pose_world=original_pose_world,
     )
     target_box = [
         float(center_world[0]),
@@ -477,7 +482,36 @@ def build_minimal_placement(record: Mapping[str, object]) -> dict:
     ]
     return {
         "target_box": target_box,
+        "object_center": [
+            float(object_center[0]),
+            float(object_center[1]),
+            float(object_center[2]),
+        ],
     }
+
+
+def compute_original_object_center(
+    canonical_aabb_object: np.ndarray,
+    original_pose_world: np.ndarray,
+) -> np.ndarray:
+    """
+    用法: center = compute_original_object_center(canonical_aabb, original_pose)
+    作用: 由 canonical AABB 与原始 object→world 姿态计算移动前物体 bbox 中心
+    输入: canonical_aabb_object: ndarray(6,)；original_pose_world: ndarray(4,4)
+    输出: ndarray(3,)，世界坐标系下的原始物体中心
+    """
+    canonical_aabb_object = np.asarray(canonical_aabb_object, dtype=np.float64)
+    original_pose_world = np.asarray(original_pose_world, dtype=np.float64)
+    if canonical_aabb_object.shape != (6,):
+        raise ValueError(
+            f"canonical_aabb_object must have shape (6,), got {canonical_aabb_object.shape}"
+        )
+    if original_pose_world.shape != (4, 4):
+        raise ValueError(f"original_pose_world must have shape (4, 4), got {original_pose_world.shape}")
+
+    corners_object = get_bbox_corners(canonical_aabb_object)
+    corners_world = transform_points(corners_object, original_pose_world)
+    return corners_world.mean(axis=0, dtype=np.float64)
 
 
 def compute_yaw_aligned_box_size(

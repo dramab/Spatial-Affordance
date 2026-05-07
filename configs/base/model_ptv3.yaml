@@ -60,3 +60,7 @@ bbox3d_head:
   num_layers: 2
   out_dim: 7                # cx, cy, cz, log_l, log_w, log_h, yaw
 
+object_center_head:
+  hidden_dim: 256
+  num_layers: 2
+  out_dim: 3                # object cx, cy, cz

@@ -87,7 +87,10 @@ def _write_minimal_inputs(tmp_path: Path, reference_id: str = "obj_1") -> tuple[
                     "point_cloud_path": "outputs/pc.ply",
                     "prompt": "Move Target to the right of Reference.",
                     "polished_prompt": "",
-                    "placement": {"target_box": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0]},
+                    "placement": {
+                        "target_box": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0],
+                        "object_center": [1.0, 2.0, 3.0],
+                    },
                     "camera": camera,
                 }
             ]
@@ -178,6 +181,7 @@ def test_build_benchmark_manifest_writes_self_contained_metric_inputs(tmp_path, 
     sample = payload["samples"][0]
     assert payload["sample_count"] == 1
     assert sample["target_box_world"] == [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0]
+    assert sample["object_center_world"] == [1.0, 2.0, 3.0]
     assert sample["direction"]["expected_relation"] == "the right of"
     assert sample["direction"]["reference_object_id"] == "obj_1"
     assert len(sample["direction"]["reference_corners_world"]) == 8

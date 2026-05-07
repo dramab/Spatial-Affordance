@@ -13,6 +13,7 @@ src/models/multimodal_model.py
         text_inputs=["place the cup near the chair"],
     )
     pred_boxes_norm = outputs["pred_boxes_norm"]
+    pred_object_centers_norm = outputs["pred_object_centers_norm"]
 """
 
 from __future__ import annotations
@@ -30,12 +31,12 @@ from src.models.backbones import (
 from src.models.common import cfg_get
 from src.models.encoders import TextEncoder
 from src.models.fusion import MultimodalDecoder, UnifiedMultimodalEncoder
-from src.models.heads import BBox3DHead
+from src.models.heads import BBox3DHead, Center3DHead
 
 
 class MultimodalModel(nn.Module):
     """
-    作用：将三种模态编码为统一 memory，并输出 7D 3D BBox。
+    作用：将三种模态编码为统一 memory，并输出放置 7D 3D BBox 与移动前物体中心。
 
     输入：
         points_xyz: Tensor(B, N, 3) 点云坐标，可为 None
@@ -43,7 +44,7 @@ class MultimodalModel(nn.Module):
         images: Tensor(B, 3, H, W) 图像，可为 None
         text_inputs: list[str] 或 tokenizer 输出字典，可为 None
     输出：
-        dict，包含编码结果、decoder 输出以及 pred_boxes_norm
+        dict，包含编码结果、decoder 输出、pred_boxes_norm 与 pred_object_centers_norm
     """
 
     def __init__(self, cfg: Mapping[str, Any] | object):
@@ -55,6 +56,7 @@ class MultimodalModel(nn.Module):
         fusion_cfg = cfg_get(cfg, "fusion", {})
         decoder_cfg = cfg_get(cfg, "decoder", {})
         bbox3d_head_cfg = cfg_get(cfg, "bbox3d_head", {})
+        object_center_head_cfg = cfg_get(cfg, "object_center_head", {})
 
         self.image_backbone = ImageBackbone(image_backbone_cfg)
         self.pc_backbone = PCBackbone(pc_backbone_cfg)
@@ -81,6 +83,15 @@ class MultimodalModel(nn.Module):
             hidden_dim=int(cfg_get(bbox3d_head_cfg, "hidden_dim", hidden_dim)),
             num_layers=int(cfg_get(bbox3d_head_cfg, "num_layers", 2)),
             out_dim=int(cfg_get(bbox3d_head_cfg, "out_dim", 7)),
+        )
+        self.object_center_head = Center3DHead(
+            hidden_dim=int(cfg_get(object_center_head_cfg, "hidden_dim", hidden_dim)),
+            num_layers=int(cfg_get(
+                object_center_head_cfg,
+                "num_layers",
+                cfg_get(bbox3d_head_cfg, "num_layers", 2),
+            )),
+            out_dim=int(cfg_get(object_center_head_cfg, "out_dim", 3)),
         )
 
     def _encode_point_inputs(
@@ -132,7 +143,7 @@ class MultimodalModel(nn.Module):
             text_inputs: list[str] 或 tokenizer 输出字典
         输出：
             dict，包含 memory、memory_mask、decoder_tokens、
-            pred_boxes_norm 与 modality_lengths
+            pred_boxes_norm、pred_object_centers_norm 与 modality_lengths
         """
         point_dict = self._encode_point_inputs(points_xyz, point_feats)
         image_dict = None if images is None else self.image_backbone(images)
@@ -148,6 +159,7 @@ class MultimodalModel(nn.Module):
             memory_mask=memory_dict["memory_mask"],
         )
         pred_boxes_norm = self.bbox3d_head(decoder_dict["decoder_tokens"])
+        pred_object_centers_norm = self.object_center_head(decoder_dict["decoder_tokens"])
 
         return {
             "memory": memory_dict["memory"],
@@ -155,4 +167,5 @@ class MultimodalModel(nn.Module):
             "modality_lengths": memory_dict["modality_lengths"],
             "decoder_tokens": decoder_dict["decoder_tokens"],
             "pred_boxes_norm": pred_boxes_norm,
+            "pred_object_centers_norm": pred_object_centers_norm,
         }

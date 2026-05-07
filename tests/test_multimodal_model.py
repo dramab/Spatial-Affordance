@@ -156,6 +156,11 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "out_dim": 7,
         },
+        "object_center_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 3,
+        },
     }
 
 
@@ -219,7 +224,9 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
     assert outputs["memory_mask"].dtype == torch.bool
     assert outputs["decoder_tokens"].shape == (2, 1, 32)
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)
     assert torch.isfinite(outputs["pred_boxes_norm"]).all()
+    assert torch.isfinite(outputs["pred_object_centers_norm"]).all()
     assert "pred_boxes" not in outputs
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
@@ -316,5 +323,7 @@ def test_multimodal_model_forward_outputs_normalized_boxes_only(monkeypatch):
     )
 
     assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)
     assert torch.isfinite(outputs["pred_boxes_norm"]).all()
+    assert torch.isfinite(outputs["pred_object_centers_norm"]).all()
     assert "pred_boxes" not in outputs

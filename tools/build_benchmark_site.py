@@ -254,6 +254,7 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
     collision = sample.get("collision") if isinstance(sample.get("collision"), dict) else {}
     direction = sample.get("direction") if isinstance(sample.get("direction"), dict) else {}
     size = sample.get("size") if isinstance(sample.get("size"), dict) else {}
+    object_center = sample.get("object_center") if isinstance(sample.get("object_center"), dict) else {}
     status = sample.get("status") if isinstance(sample.get("status"), dict) else {}
     errors = sample.get("errors") if isinstance(sample.get("errors"), list) else []
 
@@ -273,7 +274,9 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "rgb_path": str(prediction.get("rgb_path", "")),
         "has_image": image_path.exists(),
         "full_metric_evaluated": bool(status.get("full_metric_evaluated")),
+        "overall_metric_evaluated": bool(status.get("overall_metric_evaluated")),
         "placement_success": bool(status.get("placement_success")),
+        "overall_success": bool(status.get("overall_success")),
         "collision_evaluated": bool(status.get("collision_evaluated")),
         "collision_free": bool(collision.get("collision_free")),
         "occupied_collision_ratio": collision.get("occupied_collision_ratio"),
@@ -291,8 +294,14 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "volume_error_cm3": size.get("volume_error_cm3"),
         "volume_error_ratio": size.get("volume_error_ratio"),
         "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
+        "object_center_evaluated": bool(status.get("object_center_evaluated")),
+        "object_center_match": bool(object_center.get("center_match")),
+        "object_center_l2_error_cm": object_center.get("center_l2_error_cm"),
+        "object_center_l2_threshold_cm": object_center.get("center_l2_threshold_cm"),
         "pred_box_world": prediction.get("pred_box_world", []),
         "gt_box_world": prediction.get("gt_box_world", []),
+        "pred_object_center_world": prediction.get("pred_object_center_world", []),
+        "gt_object_center_world": prediction.get("gt_object_center_world", []),
         "errors": [str(error) for error in errors],
     }
 

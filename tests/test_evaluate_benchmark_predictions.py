@@ -81,6 +81,7 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
                     "frame_id": "0000",
                     "object_id": "obj_0",
                     "target_box_world": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0],
+                    "object_center_world": [1.0, 2.0, 3.0],
                     "camera": camera,
                     "occupancy": {
                         "path": occupancy_rel,
@@ -110,6 +111,7 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
                     "sample_id": "sample_0",
                     "source_name": "hope",
                     "pred_box_world": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0],
+                    "pred_object_center_world": [1.0, 2.0, 3.0],
                 }
             ],
         },
@@ -140,5 +142,12 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
     assert per_sample["size"]["volume_error_ratio"] == 0.0
     assert per_sample["direction"]["direction_correct"] is True
     assert per_sample["direction"]["center_match"] is True
+    assert per_sample["object_center"]["evaluated"] is True
+    assert per_sample["object_center"]["center_match"] is True
+    assert per_sample["object_center"]["center_l2_error_cm"] == 0.0
     assert per_sample["status"]["placement_success"] is True
+    assert per_sample["status"]["object_center_success"] is True
+    assert per_sample["status"]["overall_success"] is True
+    assert summary["summary"]["object_center_match_rate"] == 1.0
+    assert summary["summary"]["overall_success_rate"] == 1.0
     assert (output_dir / "per_sample_metrics.csv").exists()

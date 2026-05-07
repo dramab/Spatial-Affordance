@@ -182,6 +182,11 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "out_dim": 7,
         },
+        "object_center_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 3,
+        },
     }
 
 
@@ -217,7 +222,7 @@ def _build_annotation_root(tmp_path: Path) -> Path:
     )
 
     payload = {
-        "schema_version": "placement_multimodal_dataset/v1",
+        "schema_version": "placement_multimodal_dataset/v2",
         "split": "test",
         "sample_count": 2,
         "samples": [
@@ -230,6 +235,7 @@ def _build_annotation_root(tmp_path: Path) -> Path:
                 "polished_prompt": "polished prompt a",
                 "placement": {
                     "target_box": [1.0, 2.0, 0.0, 2.0, 4.0, 6.0, 270.0],
+                    "object_center": [2.0, 4.0, 0.0],
                 },
                 "camera": {
                     "fx": 100.0,
@@ -250,6 +256,7 @@ def _build_annotation_root(tmp_path: Path) -> Path:
                 "polished_prompt": "polished prompt b",
                 "placement": {
                     "target_box": [3.0, 3.0, 0.0, 2.0, 2.0, 4.0, 90.0],
+                    "object_center": [1.0, 1.0, 0.0],
                 },
                 "camera": {
                     "fx": 120.0,
@@ -311,12 +318,17 @@ def _build_checkpoint(tmp_path: Path, annotation_dir: Path, monkeypatch) -> Path
     return checkpoint_path
 
 
-def _build_expected_prediction(annotation_dir: Path, checkpoint_path: Path, sample_index: int, monkeypatch, tmp_path: Path) -> np.ndarray:
+def _build_expected_prediction(
+        annotation_dir: Path,
+        checkpoint_path: Path,
+        sample_index: int,
+        monkeypatch,
+        tmp_path: Path) -> tuple[np.ndarray, np.ndarray]:
     """
-    用法: pred_box_world = _build_expected_prediction(annotation_dir, checkpoint_path, 0, monkeypatch, tmp_path)
-    作用: 独立运行一遍模型前向，生成用于断言的期望世界坐标预测框
+    用法: pred_box_world, pred_center_world = _build_expected_prediction(annotation_dir, checkpoint_path, 0, monkeypatch, tmp_path)
+    作用: 独立运行一遍模型前向，生成用于断言的期望世界坐标预测框与物体中心
     输入: annotation_dir: Path；checkpoint_path: Path；sample_index: int；monkeypatch；tmp_path: Path
-    输出: ndarray(7,)，期望世界坐标预测框
+    输出: tuple，分别为 ndarray(7,) 预测框与 ndarray(3,) 预测中心
     """
     monkeypatch.setattr("src.datasets.multimodal_dataset.PROJECT_ROOT", tmp_path)
     dataset = PlacementMultimodalDataset(
@@ -340,10 +352,24 @@ def _build_expected_prediction(annotation_dir: Path, checkpoint_path: Path, samp
             text_inputs=batch["text_inputs"],
         )
     pred_box_norm = infer_multimodal.squeeze_single_query_boxes(outputs["pred_boxes_norm"])[0].detach().cpu().numpy()
+    pred_center_norm = infer_multimodal.squeeze_single_query_centers(
+        outputs["pred_object_centers_norm"]
+    )[0].detach().cpu().numpy()
     scene_center = batch["norm_meta"]["scene_center"][0].detach().cpu().numpy()
     scene_scale = float(batch["norm_meta"]["scene_scale"][0].item())
     yaw_scale = float(batch["norm_meta"]["yaw_scale"][0].item())
-    return infer_multimodal.denormalize_world_box(pred_box_norm, scene_center, scene_scale, yaw_scale)
+    pred_box_world = infer_multimodal.denormalize_world_box(
+        pred_box_norm,
+        scene_center,
+        scene_scale,
+        yaw_scale,
+    )
+    pred_center_world = infer_multimodal.denormalize_world_center(
+        pred_center_norm,
+        scene_center,
+        scene_scale,
+    )
+    return pred_box_world, pred_center_world
 
 
 def test_denormalize_world_box_exp_recovers_log_size_norm():
@@ -370,6 +396,40 @@ def test_denormalize_world_box_exp_recovers_log_size_norm():
 
     expected_box_world = np.array([2.0, 0.0, 3.0, 2.0, 4.0, 6.0, -90.0], dtype=np.float64)
     assert np.allclose(box_world, expected_box_world, atol=1e-6)
+
+
+def test_save_prediction_visualization_draws_object_center_dot(tmp_path):
+    """
+    作用：验证推理可视化会用粗圆点绘制预测移动前物体中心。
+
+    输入：
+        tmp_path: pytest 临时目录
+    输出：
+        无，通过中心像素颜色断言验证结果
+    """
+    rgb_path = tmp_path / "input.png"
+    output_path = tmp_path / "vis.png"
+    _write_rgb_image(rgb_path, width=32, height=24)
+    camera = {
+        "fx": 10.0,
+        "fy": 10.0,
+        "cx": 16.0,
+        "cy": 12.0,
+        "img_w": 32,
+        "img_h": 24,
+        "E_c2w": np.eye(4, dtype=np.float64).tolist(),
+    }
+
+    infer_multimodal.save_prediction_visualization(
+        rgb_path=rgb_path,
+        pred_box_world=np.array([0.0, 0.0, 10.0, 2.0, 2.0, 2.0, 0.0], dtype=np.float64),
+        pred_object_center_world=np.array([0.0, 0.0, 10.0], dtype=np.float64),
+        camera_dict=camera,
+        output_path=output_path,
+    )
+
+    image = np.asarray(Image.open(output_path).convert("RGB"))
+    assert tuple(image[12, 16].tolist()) == infer_multimodal.COLOR_OBJECT_CENTER
 
 
 def test_infer_multimodal_exports_predictions_and_visualizations(tmp_path, monkeypatch):
@@ -403,7 +463,7 @@ def test_infer_multimodal_exports_predictions_and_visualizations(tmp_path, monke
     payload = infer_multimodal.run_inference(args)
     predictions_path = tmp_path / "outputs/multimodal_infer/predictions.json"
     payload_from_disk = json.loads(predictions_path.read_text(encoding="utf-8"))
-    expected_pred_box_world = _build_expected_prediction(
+    expected_pred_box_world, expected_pred_object_center_world = _build_expected_prediction(
         annotation_dir=annotation_dir,
         checkpoint_path=checkpoint_path,
         sample_index=0,
@@ -420,7 +480,14 @@ def test_infer_multimodal_exports_predictions_and_visualizations(tmp_path, monke
     assert first_prediction["sample_id"] == "sample_a"
     assert first_prediction["source_name"] == "demo"
     assert first_prediction["gt_box_world"] == [1.0, 2.0, 0.0, 2.0, 4.0, 6.0, 270.0]
+    assert first_prediction["gt_object_center_world"] == [2.0, 4.0, 0.0]
     assert np.allclose(first_prediction["pred_box_world"], expected_pred_box_world, atol=1e-6)
+    assert np.allclose(
+        first_prediction["pred_object_center_world"],
+        expected_pred_object_center_world,
+        atol=1e-6,
+    )
+    assert len(first_prediction["pred_object_center_norm"]) == 3
     assert predictions_path.exists()
     assert vis_path.exists()
     assert Image.open(vis_path).size == (32, 24)

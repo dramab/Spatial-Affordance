@@ -236,7 +236,7 @@ def build_dataset(dataset_cfg: dict[str, Any], split: str) -> PlacementMultimoda
     """
     image_size = tuple(int(v) for v in dataset_cfg.get("image_size", (480, 640)))
     return PlacementMultimodalDataset(
-        annotation_dir=resolve_project_path(dataset_cfg.get("annotation_dir", "data/annotations/placement_multimodal")),
+        annotation_dir=resolve_project_path(dataset_cfg.get("annotation_dir", "data/annotations/placement_multimodal_v2")),
         split=split,
         prompt_key=str(dataset_cfg.get("prompt_key", "polished_prompt")),
         image_size=image_size,
@@ -288,6 +288,7 @@ def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[st
         "points_xyz": batch["points_xyz"].to(device, non_blocking=True),
         "text_inputs": batch["text_inputs"],
         "target_boxes_norm": batch["target_boxes_norm"].to(device, non_blocking=True),
+        "object_centers_norm": batch["object_centers_norm"].to(device, non_blocking=True),
     }
 
 
@@ -344,7 +345,7 @@ def format_metrics(metrics: dict[str, float]) -> str:
     输入: metrics: dict[str, float]，指标字典
     输出: str，格式化后的日志文本
     """
-    ordered_keys = ("loss", "center_loss", "size_loss", "yaw_loss")
+    ordered_keys = ("loss", "center_loss", "object_center_loss", "size_loss", "yaw_loss")
     chunks = []
     for key in ordered_keys:
         if key in metrics:
@@ -401,6 +402,7 @@ def run_one_epoch(
     metric_sums = {
         "loss": 0.0,
         "center_loss": 0.0,
+        "object_center_loss": 0.0,
         "size_loss": 0.0,
         "yaw_loss": 0.0,
     }
@@ -444,6 +446,8 @@ def run_one_epoch(
                 loss_dict = criterion(
                     pred_boxes_norm=outputs["pred_boxes_norm"],
                     target_boxes_norm=batch_inputs["target_boxes_norm"],
+                    pred_object_centers_norm=outputs["pred_object_centers_norm"],
+                    target_object_centers_norm=batch_inputs["object_centers_norm"],
                 )
                 loss = loss_dict["loss"]
 
@@ -628,10 +632,12 @@ def main() -> None:
     )
 
     model = MultimodalModel(model_cfg).to(device)
+    center_weight = float(loss_cfg.get("center_weight", 1.0))
     criterion = MultimodalBBoxLoss(
-        center_weight=float(loss_cfg.get("center_weight", 1.0)),
+        center_weight=center_weight,
         size_weight=float(loss_cfg.get("size_weight", 1.0)),
         yaw_weight=float(loss_cfg.get("yaw_weight", 0.5)),
+        object_center_weight=float(loss_cfg.get("object_center_weight", center_weight)),
         smooth_l1_beta=float(loss_cfg.get("smooth_l1_beta", 1.0)),
     )
     optimizer = create_optimizer(model, optimization_cfg)

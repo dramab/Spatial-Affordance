@@ -5,5 +5,6 @@ src/models/heads/__init__.py
 """
 
 from src.models.heads.bbox3d_head import BBox3DHead
+from src.models.heads.center3d_head import Center3DHead
 
-__all__ = ["BBox3DHead"]
+__all__ = ["BBox3DHead", "Center3DHead"]

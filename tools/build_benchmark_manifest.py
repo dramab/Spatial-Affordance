@@ -14,7 +14,7 @@ tools/build_benchmark_manifest.py
         --overwrite
 
 作用:
-    - 固化 size/collision/direction metric 所需全部标注字段
+    - 固化 size/collision/direction/object_center metric 所需全部标注字段
     - 将 occupancy grid 复制进 benchmark 包
     - 后续评测只依赖 benchmark manifest 和 predictions.json
 
@@ -259,6 +259,8 @@ def build_manifest_sample(
     placement = sample.get("placement", {})
     if "target_box" not in placement:
         raise ValueError(f"missing placement.target_box for {label_key}")
+    if "object_center" not in placement:
+        raise ValueError(f"missing placement.object_center for {label_key}")
     camera = sample.get("camera") or grid_meta.get("camera")
     if not isinstance(camera, dict):
         raise ValueError(f"missing camera for {label_key}")
@@ -275,6 +277,7 @@ def build_manifest_sample(
         "rgb_path": sample.get("rgb_path"),
         "point_cloud_path": sample.get("point_cloud_path"),
         "target_box_world": list(placement["target_box"]),
+        "object_center_world": list(placement["object_center"]),
         "camera": camera,
         "occupancy": {
             "path": occupancy_rel_path,

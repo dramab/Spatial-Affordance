@@ -1,7 +1,7 @@
 model_config_path: configs/base/model_textLen128_9_9_out512.yaml
 
 dataset:
-  annotation_dir: data/annotations/placement_multimodal_simple
+  annotation_dir: data/annotations/placement_multimodal_simple_v2
   prompt_key: prompt
   image_size: [480, 640]
   scale_eps: 1.0e-6
@@ -30,6 +30,7 @@ scheduler:
 
 loss:
   center_weight: 5
+  object_center_weight: 5
   size_weight: 10
   yaw_weight: 0.2
   smooth_l1_beta: 0.05

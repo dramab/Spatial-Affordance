@@ -5,7 +5,7 @@ tests/test_multimodal_bbox_loss.py
 
 测试内容：
 - test_multimodal_bbox_loss_returns_zero_for_identical_boxes：
-  验证预测框与目标框一致时损失为 0
+  验证预测框、物体中心与目标一致时损失为 0
 - test_multimodal_bbox_loss_matches_weighted_smooth_l1_sum：
   验证总损失与各分量损失满足加权求和关系
 - test_multimodal_bbox_loss_rejects_multi_query_predictions：
@@ -25,7 +25,7 @@ from src.losses import MultimodalBBoxLoss
 
 def test_multimodal_bbox_loss_returns_zero_for_identical_boxes():
     """
-    作用：验证预测框与目标框完全一致时，各项损失都为 0。
+    作用：验证预测框和移动前物体中心完全一致时，各项损失都为 0。
 
     输入：
         无，内部构造单 query normalized 7D box
@@ -43,13 +43,16 @@ def test_multimodal_bbox_loss_returns_zero_for_identical_boxes():
         dtype=torch.float32,
     )
     target_boxes = pred_boxes.clone()
+    pred_centers = torch.tensor([[[0.2, -0.1, 0.4]]], dtype=torch.float32)
+    target_centers = pred_centers.clone()
 
-    loss_dict = criterion(pred_boxes, target_boxes)
+    loss_dict = criterion(pred_boxes, target_boxes, pred_centers, target_centers)
 
     assert loss_dict["loss"].item() == 0.0
     assert loss_dict["center_loss"].item() == 0.0
     assert loss_dict["size_loss"].item() == 0.0
     assert loss_dict["yaw_loss"].item() == 0.0
+    assert loss_dict["object_center_loss"].item() == 0.0
 
 
 def test_multimodal_bbox_loss_matches_weighted_smooth_l1_sum():
@@ -65,6 +68,7 @@ def test_multimodal_bbox_loss_matches_weighted_smooth_l1_sum():
         center_weight=2.0,
         size_weight=3.0,
         yaw_weight=4.0,
+        object_center_weight=5.0,
         smooth_l1_beta=1.0,
     )
     pred_boxes = torch.tensor(
@@ -81,8 +85,22 @@ def test_multimodal_bbox_loss_matches_weighted_smooth_l1_sum():
         ],
         dtype=torch.float32,
     )
+    pred_centers = torch.tensor(
+        [
+            [0.5, -0.5, 0.0],
+            [0.1, 0.2, 0.3],
+        ],
+        dtype=torch.float32,
+    )
+    target_centers = torch.tensor(
+        [
+            [0.0, -0.2, 0.4],
+            [0.3, 0.0, 0.1],
+        ],
+        dtype=torch.float32,
+    )
 
-    loss_dict = criterion(pred_boxes, target_boxes)
+    loss_dict = criterion(pred_boxes, target_boxes, pred_centers, target_centers)
     expected_center_loss = F.smooth_l1_loss(
         pred_boxes[:, 0:3],
         target_boxes[:, 0:3],
@@ -101,15 +119,23 @@ def test_multimodal_bbox_loss_matches_weighted_smooth_l1_sum():
         beta=1.0,
         reduction="mean",
     )
+    expected_object_center_loss = F.smooth_l1_loss(
+        pred_centers,
+        target_centers,
+        beta=1.0,
+        reduction="mean",
+    )
     expected_total_loss = (
         2.0 * expected_center_loss +
         3.0 * expected_size_loss +
-        4.0 * expected_yaw_loss
+        4.0 * expected_yaw_loss +
+        5.0 * expected_object_center_loss
     )
 
     torch.testing.assert_close(loss_dict["center_loss"], expected_center_loss)
     torch.testing.assert_close(loss_dict["size_loss"], expected_size_loss)
     torch.testing.assert_close(loss_dict["yaw_loss"], expected_yaw_loss)
+    torch.testing.assert_close(loss_dict["object_center_loss"], expected_object_center_loss)
     torch.testing.assert_close(loss_dict["loss"], expected_total_loss)
 
 
@@ -125,9 +151,11 @@ def test_multimodal_bbox_loss_rejects_multi_query_predictions():
     criterion = MultimodalBBoxLoss()
     pred_boxes = torch.zeros((2, 2, 7), dtype=torch.float32)
     target_boxes = torch.zeros((2, 7), dtype=torch.float32)
+    pred_centers = torch.zeros((2, 1, 3), dtype=torch.float32)
+    target_centers = torch.zeros((2, 3), dtype=torch.float32)
 
     try:
-        criterion(pred_boxes, target_boxes)
+        criterion(pred_boxes, target_boxes, pred_centers, target_centers)
     except ValueError as exc:
         assert "must have shape (B, 7) or (B, 1, 7)" in str(exc)
     else:
