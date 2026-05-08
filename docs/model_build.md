@@ -26,7 +26,8 @@ src/models/
 |   `-- multimodal_transformer.py
 `-- heads/
     |-- __init__.py
-    `-- bbox3d_head.py
+    |-- center3d_head.py
+    `-- size_yaw_head.py
 ```
 
 从功能上看，可以分为五个部分：
@@ -48,7 +49,7 @@ src/models/
 3. 构建文本编码器 `TextEncoder`
 4. 根据三种模态输出维度，构建统一融合编码器 `UnifiedMultimodalEncoder`
 5. 构建 query 解码器 `MultimodalDecoder`
-6. 构建 3D 框预测头 `BBox3DHead`
+6. 构建目标物体 center、放置位 center 与 size/yaw 输出头
 
 对应关系如下：
 
@@ -58,12 +59,14 @@ images ----------------------> ImageBackbone -> 图像 token
 text_inputs -----------------> TextEncoder ---> 文本 token
 
 三种 token ------------------> UnifiedMultimodalEncoder -> memory
-memory ----------------------> MultimodalDecoder --------> decoder tokens
-decoder tokens --------------> BBox3DHead ---------------> pred_boxes_norm
-pred_boxes_norm + box_norm_meta -------------------------> pred_boxes
+memory ----------------------> MultimodalDecoder --------> object / placement queries
+object query ----------------> Center3DHead -------------> pred_object_centers_norm
+placement query -------------> Center3DHead -------------> pred_placement_centers_norm
+object + placement queries --> SizeYawHead --------------> pred_size_yaw_norm
+placement center + size/yaw -----------------------------> pred_boxes_norm
 ```
 
-其中，`pred_boxes_norm` 是归一化坐标系下的预测框；若传入 `box_norm_meta`，模型还会进一步恢复到场景坐标系下的 `pred_boxes`。
+其中，`pred_boxes_norm` 是归一化坐标系下的预测框；世界坐标恢复由推理或评测脚本在模型外部完成。
 
 ## 3. 总入口 MultimodalModel
 
@@ -80,7 +83,9 @@ pred_boxes_norm + box_norm_meta -------------------------> pred_boxes
 - `self.text_encoder`
 - `self.multimodal_encoder`
 - `self.decoder`
-- `self.bbox3d_head`
+- `self.object_center_head`
+- `self.placement_center_head`
+- `self.size_yaw_head`
 
 这里有一个重要设计点：点云、图像、文本分支并不是直接输出最终结果，而是都被规整为统一格式的 token 字典，再送入融合模块。这样做的好处是：
 
@@ -393,37 +398,35 @@ fused_token = feature_proj(token) + modality_embed
 - `dropout`
 - `num_queries`
 
-当前默认 `num_queries=1`，意味着模型默认只预测一个候选框；如果后续需要支持多框预测，可以从 query 数量和后处理逻辑两侧继续扩展。
+当前默认 `num_queries=2`，固定语义为 `query 0 = object`、`query 1 = placement`。模型不做 query matching，而是直接按这两个固定位置读取目标物体信息和放置位信息。
 
 输出字段包括：
 
 - `decoder_tokens`
-- `query_embed`
 
-## 8. 检测头 BBox3DHead
+## 8. 检测头 Center3DHead 与 SizeYawHead
 
-`BBox3DHead` 位于 `src/models/heads/bbox3d_head.py`，负责把 decoder 输出 token 映射为最终 3D 包围框参数。
+检测头位于 `src/models/heads/`，负责把两个 decoder query 映射为最终 3D 包围框参数。
 
-当前头部设计相对直接：
+当前头部拆成三部分：
 
-- 先经过若干层 MLP
-- 再通过线性层输出 7 维参数
+- `object_center_head`：接收 object query，输出目标物体原始中心 `pred_object_centers_norm`
+- `placement_center_head`：接收 placement query，输出放置位中心 `pred_placement_centers_norm`
+- `size_yaw_head`：接收 object query 与 placement query 的拼接特征，输出 `pred_size_yaw_norm`
 
-输出格式固定为：
+最终 `pred_boxes_norm` 由放置位中心和 size/yaw 拼接得到，格式固定为：
 
 ```text
-(cx, cy, cz, l, w, h, yaw)
+(cx, cy, cz, log_l, log_w, log_h, yaw)
 ```
 
 其中：
 
-- `cx, cy, cz` 表示框中心
-- `l, w, h` 表示框尺寸
+- `cx, cy, cz` 表示放置位框中心
+- `log_l, log_w, log_h` 表示归一化尺寸的 log 回归值
 - `yaw` 表示朝向角
 
-有一个关键细节：`l, w, h` 三个尺寸项会经过 `softplus`，并额外加上一个很小的正数，以保证尺寸始终为正。
-
-当前 `BBox3DHead` 只支持 `out_dim=7`，如果未来需要扩展更多参数，例如类别分数、置信度或额外姿态参数，需要同步修改头部实现和下游损失定义。
+尺寸项不在模型内部做正值约束，训练目标与推理恢复逻辑统一使用 `log(size_norm)`。
 
 ## 9. 前向数据流
 
@@ -461,28 +464,30 @@ fused_token = feature_proj(token) + modality_embed
 `self.decoder` 接收 `memory` 与 `memory_mask`，输出：
 
 - `decoder_tokens`
-- `query_embed`
 
 ### 9.4 3D 框回归
 
-`self.bbox3d_head` 接收 `decoder_tokens`，输出归一化框：
+模型按固定语义拆分 `decoder_tokens`：
 
-- `pred_boxes_norm`
+- object query 送入 `object_center_head`，得到 `pred_object_centers_norm`
+- placement query 送入 `placement_center_head`，得到 `pred_placement_centers_norm`
+- 两个 query 拼接后送入 `size_yaw_head`，得到 `pred_size_yaw_norm`
+- `pred_placement_centers_norm` 与 `pred_size_yaw_norm` 拼接为 `pred_boxes_norm`
 
-### 9.5 可选去归一化
+### 9.5 坐标恢复
 
-若调用 `forward` 时提供了 `box_norm_meta`，则会通过 `_denormalize_boxes` 恢复到场景坐标系：
+`forward` 只输出 normalized 结果，世界坐标恢复由推理或评测脚本处理：
 
 - 中心坐标使用 `scene_center` 与 `scene_scale` 反变换
-- 框尺寸使用 `scene_scale` 反变换
-- `yaw` 当前保持不变
+- 框尺寸先对 log-size 做 `exp`，再使用 `scene_scale` 反变换
+- `yaw` 使用数据集记录的 yaw 归一化比例反变换
 
-因此最终输出中同时保留：
+因此模型输出中保留：
 
 - `pred_boxes_norm`
-- `pred_boxes`
-
-若未提供 `box_norm_meta`，则 `pred_boxes` 与 `pred_boxes_norm` 相同。
+- `pred_object_centers_norm`
+- `pred_placement_centers_norm`
+- `pred_size_yaw_norm`
 
 ## 10. 输入输出约定
 
@@ -494,30 +499,23 @@ fused_token = feature_proj(token) + modality_embed
 - `point_feats`：`Tensor(B, N, F)`，可选
 - `images`：`Tensor(B, 3, H, W)`，可选
 - `text_inputs`：`list[str]` 或 tokenizer 输出字典，可选
-- `box_norm_meta`：字典，可选
 
 其中：
 
 - 至少需要提供一种模态输入，否则融合模块会报错
-- 若提供 `box_norm_meta`，则必须至少包含：
-  - `scene_center`：`Tensor(B, 3)`
-  - `scene_scale`：`Tensor(B,)` 或 `Tensor(B, 1)`
 
 ### 10.2 forward 输出
 
 当前 `forward` 返回一个字典，包含：
 
-- `point_outputs`
-- `image_outputs`
-- `text_outputs`
 - `memory`
 - `memory_mask`
-- `memory_pos`
 - `modality_lengths`
 - `decoder_tokens`
-- `query_embed`
 - `pred_boxes_norm`
-- `pred_boxes`
+- `pred_object_centers_norm`
+- `pred_placement_centers_norm`
+- `pred_size_yaw_norm`
 
 这种设计保留了较多中间结果，优点是方便调试、可视化和损失扩展；代价是返回结构相对较重。
 
@@ -530,7 +528,9 @@ fused_token = feature_proj(token) + modality_embed
 - `text_encoder`
 - `fusion`
 - `decoder`
-- `bbox3d_head`
+- `object_center_head`
+- `placement_center_head`
+- `size_yaw_head`
 
 也就是说，配置组织形式大致应为：
 
@@ -541,7 +541,9 @@ model_cfg = {
     "text_encoder": {...},
     "fusion": {...},
     "decoder": {...},
-    "bbox3d_head": {...},
+    "object_center_head": {...},
+    "placement_center_head": {...},
+    "size_yaw_head": {...},
 }
 ```
 
@@ -570,9 +572,9 @@ model_cfg = {
 
 融合阶段对文本 token 没有额外加入显式位置投影，文本顺序信息主要依赖预训练语言模型自身表示。这一设计当前是成立的，但若后续需要更强的跨模态对齐能力，可以考虑加入单独的文本位置编码方案。
 
-### 12.4 当前默认是单 query 单框预测
+### 12.4 当前默认是双 query 单框预测
 
-decoder 默认只有一个 query，因此当前实现天然更接近“给定场景和描述，回归一个目标框”的任务设定，而不是完整的多目标检测框架。
+decoder 默认使用两个固定语义 query：object query 表达目标物体，placement query 表达放置位。当前实现仍然是“给定场景和描述，回归一个目标放置框”的任务设定，而不是完整的多目标检测框架。
 
 ### 12.5 返回中保留了大量中间字段
 

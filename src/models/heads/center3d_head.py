@@ -23,9 +23,9 @@ class Center3DHead(nn.Module):
     作用：将 decoder token 映射为 3D center 坐标。
 
     输入：
-        decoder_tokens: Tensor(B, Q, H) decoder 输出 token
+        decoder_tokens: Tensor(..., H) decoder 输出 token
     输出：
-        Tensor(B, Q, 3)，格式为 (cx, cy, cz)
+        Tensor(..., 3)，格式为 (cx, cy, cz)
     """
 
     def __init__(self, hidden_dim: int = 256, num_layers: int = 2, out_dim: int = 3):
@@ -52,8 +52,8 @@ class Center3DHead(nn.Module):
         """
         用法: pred_centers = head(decoder_tokens)
         作用: 回归 normalized 3D center 坐标
-        输入: decoder_tokens: Tensor(B, Q, H)
-        输出: Tensor(B, Q, 3)
+        输入: decoder_tokens: Tensor(...,H)
+        输出: Tensor(...,3)
         """
         hidden = self.mlp(decoder_tokens)
         return self.output(hidden).to(torch.float32)

@@ -41,14 +41,19 @@ decoder:
   num_heads: 8
   hidden_dim: 256
   dropout: 0.1
-  num_queries: 1
+  num_queries: 2
 
-bbox3d_head:
+placement_center_head:
   hidden_dim: 256
   num_layers: 2
-  out_dim: 7                # cx, cy, cz, log_l, log_w, log_h, yaw
+  out_dim: 3                # placement cx, cy, cz
 
 object_center_head:
   hidden_dim: 256
   num_layers: 2
   out_dim: 3                # object cx, cy, cz
+
+size_yaw_head:
+  hidden_dim: 256
+  num_layers: 2
+  out_dim: 4                # log_l, log_w, log_h, yaw

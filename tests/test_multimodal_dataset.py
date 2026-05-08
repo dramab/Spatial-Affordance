@@ -122,17 +122,22 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "num_heads": 4,
             "dropout": 0.0,
-            "num_queries": 1,
+            "num_queries": 2,
         },
-        "bbox3d_head": {
+        "placement_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
-            "out_dim": 7,
+            "out_dim": 3,
         },
         "object_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
             "out_dim": 3,
+        },
+        "size_yaw_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 4,
         },
     }
 
@@ -451,5 +456,7 @@ def test_multimodal_dataset_collate_batch_can_feed_model(tmp_path, monkeypatch):
         text_inputs=batch["text_inputs"],
     )
 
-    assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)
+    assert outputs["pred_boxes_norm"].shape == (2, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 3)
+    assert outputs["pred_placement_centers_norm"].shape == (2, 3)
+    assert outputs["pred_size_yaw_norm"].shape == (2, 4)

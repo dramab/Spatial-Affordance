@@ -198,7 +198,7 @@ class MultimodalDecoder(nn.Module):
             num_layers: int = 3,
             num_heads: int = 8,
             dropout: float = 0.1,
-            num_queries: int = 1):
+            num_queries: int = 2):
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.num_queries = int(num_queries)

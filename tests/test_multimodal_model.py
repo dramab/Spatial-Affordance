@@ -4,8 +4,8 @@ tests/test_multimodal_model.py
 职责：测试统一多模态模型的前向接口与输出格式。
 
 测试内容：
-- test_multimodal_model_forward_returns_single_query_boxes：
-  验证三模态输入可以被统一编码并输出单 query 3D BBox
+- test_multimodal_model_forward_returns_dual_query_boxes：
+  验证三模态输入可以被统一编码并输出双 query 3D BBox
 - test_multimodal_model_requires_at_least_one_modality：
   验证所有模态都为空时会抛出错误
 - test_multimodal_model_forward_outputs_normalized_boxes_only：
@@ -149,17 +149,22 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "num_heads": 4,
             "dropout": 0.0,
-            "num_queries": 1,
+            "num_queries": 2,
         },
-        "bbox3d_head": {
+        "placement_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
-            "out_dim": 7,
+            "out_dim": 3,
         },
         "object_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
             "out_dim": 3,
+        },
+        "size_yaw_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 4,
         },
     }
 
@@ -188,9 +193,9 @@ def _make_points_batch() -> torch.Tensor:
     return torch.stack([sample_a, sample_b], dim=0).to(torch.float32)
 
 
-def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
+def test_multimodal_model_forward_returns_dual_query_boxes(monkeypatch):
     """
-    作用：验证多模态模型会输出统一 memory 与单 query 3D BBox。
+    作用：验证多模态模型会输出统一 memory 与双 query 3D BBox。
 
     输入：
         无，内部构造 mock 文本编码主干、点云、图像与文本
@@ -222,11 +227,17 @@ def test_multimodal_model_forward_returns_single_query_boxes(monkeypatch):
 
     assert outputs["memory"].ndim == 3
     assert outputs["memory_mask"].dtype == torch.bool
-    assert outputs["decoder_tokens"].shape == (2, 1, 32)
-    assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)
+    assert outputs["decoder_tokens"].shape == (2, 2, 32)
+    assert outputs["pred_boxes_norm"].shape == (2, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 3)
+    assert outputs["pred_placement_centers_norm"].shape == (2, 3)
+    assert outputs["pred_size_yaw_norm"].shape == (2, 4)
     assert torch.isfinite(outputs["pred_boxes_norm"]).all()
     assert torch.isfinite(outputs["pred_object_centers_norm"]).all()
+    torch.testing.assert_close(
+        outputs["pred_boxes_norm"],
+        torch.cat([outputs["pred_placement_centers_norm"], outputs["pred_size_yaw_norm"]], dim=-1),
+    )
     assert "pred_boxes" not in outputs
     assert outputs["modality_lengths"]["point"] > 0
     assert outputs["modality_lengths"]["image"] > 0
@@ -322,8 +333,10 @@ def test_multimodal_model_forward_outputs_normalized_boxes_only(monkeypatch):
         text_inputs=text_inputs,
     )
 
-    assert outputs["pred_boxes_norm"].shape == (2, 1, 7)
-    assert outputs["pred_object_centers_norm"].shape == (2, 1, 3)
+    assert outputs["pred_boxes_norm"].shape == (2, 7)
+    assert outputs["pred_object_centers_norm"].shape == (2, 3)
+    assert outputs["pred_placement_centers_norm"].shape == (2, 3)
+    assert outputs["pred_size_yaw_norm"].shape == (2, 4)
     assert torch.isfinite(outputs["pred_boxes_norm"]).all()
     assert torch.isfinite(outputs["pred_object_centers_norm"]).all()
     assert "pred_boxes" not in outputs

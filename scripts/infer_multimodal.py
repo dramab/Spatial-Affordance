@@ -192,10 +192,10 @@ def select_device(device_name: str) -> torch.device:
     return torch.device(normalized_name)
 
 
-def squeeze_single_query_boxes(pred_boxes_norm: torch.Tensor) -> torch.Tensor:
+def flatten_pred_boxes(pred_boxes_norm: torch.Tensor) -> torch.Tensor:
     """
-    用法: boxes = squeeze_single_query_boxes(outputs["pred_boxes_norm"])
-    作用: 将单 query 预测框统一整理为 (B, 7)
+    用法: boxes = flatten_pred_boxes(outputs["pred_boxes_norm"])
+    作用: 将模型预测框统一整理为 (B, 7)
     输入: pred_boxes_norm: Tensor(B, 7) 或 Tensor(B, 1, 7)
     输出: Tensor(B, 7)，压缩后的预测框
     """
@@ -204,15 +204,15 @@ def squeeze_single_query_boxes(pred_boxes_norm: torch.Tensor) -> torch.Tensor:
     if pred_boxes_norm.ndim == 3 and pred_boxes_norm.shape[1] == 1 and pred_boxes_norm.shape[2] == 7:
         return pred_boxes_norm[:, 0, :]
     raise ValueError(
-        "infer_multimodal.py 当前仅支持单 query 输出，"
+        "infer_multimodal.py 当前仅支持扁平 box 输出或兼容旧单 query box 输出，"
         f"got pred_boxes_norm shape={tuple(pred_boxes_norm.shape)}"
     )
 
 
-def squeeze_single_query_centers(pred_centers_norm: torch.Tensor) -> torch.Tensor:
+def flatten_pred_centers(pred_centers_norm: torch.Tensor) -> torch.Tensor:
     """
-    用法: centers = squeeze_single_query_centers(outputs["pred_object_centers_norm"])
-    作用: 将单 query 预测中心统一整理为 (B, 3)
+    用法: centers = flatten_pred_centers(outputs["pred_object_centers_norm"])
+    作用: 将模型预测中心统一整理为 (B, 3)
     输入: pred_centers_norm: Tensor(B, 3) 或 Tensor(B, 1, 3)
     输出: Tensor(B, 3)，压缩后的预测中心
     """
@@ -221,7 +221,7 @@ def squeeze_single_query_centers(pred_centers_norm: torch.Tensor) -> torch.Tenso
     if pred_centers_norm.ndim == 3 and pred_centers_norm.shape[1] == 1 and pred_centers_norm.shape[2] == 3:
         return pred_centers_norm[:, 0, :]
     raise ValueError(
-        "infer_multimodal.py 当前仅支持单 query center 输出，"
+        "infer_multimodal.py 当前仅支持扁平 center 输出或兼容旧单 query center 输出，"
         f"got pred_object_centers_norm shape={tuple(pred_centers_norm.shape)}"
     )
 
@@ -507,8 +507,8 @@ def run_inference(args: argparse.Namespace) -> dict[str, Any]:
         annotation_dir_override=args.annotation_dir,
     )
     decoder_cfg = dict(model_cfg.get("decoder", {}))
-    if int(decoder_cfg.get("num_queries", 1)) != 1:
-        raise ValueError("infer_multimodal.py 当前仅支持 decoder.num_queries=1 的单 query 推理")
+    if int(decoder_cfg.get("num_queries", 2)) != 2:
+        raise ValueError("infer_multimodal.py 当前仅支持 decoder.num_queries=2 的 object/placement 双 query 推理")
 
     device = select_device(args.device)
     dataset = build_dataset(dataset_cfg, split=args.split)
@@ -557,8 +557,8 @@ def run_inference(args: argparse.Namespace) -> dict[str, Any]:
                 images=batch["images"].to(device, non_blocking=True),
                 text_inputs=batch["text_inputs"],
             )
-            pred_boxes_norm = squeeze_single_query_boxes(outputs["pred_boxes_norm"]).detach().cpu().numpy()
-            pred_object_centers_norm = squeeze_single_query_centers(
+            pred_boxes_norm = flatten_pred_boxes(outputs["pred_boxes_norm"]).detach().cpu().numpy()
+            pred_object_centers_norm = flatten_pred_centers(
                 outputs["pred_object_centers_norm"]
             ).detach().cpu().numpy()
             scene_centers = batch["norm_meta"]["scene_center"].detach().cpu().numpy()

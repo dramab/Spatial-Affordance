@@ -175,17 +175,22 @@ def _make_model_cfg() -> dict:
             "num_layers": 2,
             "num_heads": 4,
             "dropout": 0.0,
-            "num_queries": 1,
+            "num_queries": 2,
         },
-        "bbox3d_head": {
+        "placement_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
-            "out_dim": 7,
+            "out_dim": 3,
         },
         "object_center_head": {
             "hidden_dim": 32,
             "num_layers": 2,
             "out_dim": 3,
+        },
+        "size_yaw_head": {
+            "hidden_dim": 32,
+            "num_layers": 2,
+            "out_dim": 4,
         },
     }
 
@@ -351,8 +356,8 @@ def _build_expected_prediction(
             images=batch["images"],
             text_inputs=batch["text_inputs"],
         )
-    pred_box_norm = infer_multimodal.squeeze_single_query_boxes(outputs["pred_boxes_norm"])[0].detach().cpu().numpy()
-    pred_center_norm = infer_multimodal.squeeze_single_query_centers(
+    pred_box_norm = infer_multimodal.flatten_pred_boxes(outputs["pred_boxes_norm"])[0].detach().cpu().numpy()
+    pred_center_norm = infer_multimodal.flatten_pred_centers(
         outputs["pred_object_centers_norm"]
     )[0].detach().cpu().numpy()
     scene_center = batch["norm_meta"]["scene_center"][0].detach().cpu().numpy()

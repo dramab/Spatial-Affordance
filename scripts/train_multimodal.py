@@ -576,8 +576,8 @@ def main() -> None:
     model_config_path = resolve_project_path(train_cfg.get("model_config_path", "configs/base/model.yaml"))
     model_cfg = load_yaml_config(model_config_path)
     decoder_cfg = dict(model_cfg.get("decoder", {}))
-    if int(decoder_cfg.get("num_queries", 1)) != 1:
-        raise ValueError("train_multimodal.py 当前仅支持 decoder.num_queries=1 的单 query 监督")
+    if int(decoder_cfg.get("num_queries", 2)) != 2:
+        raise ValueError("train_multimodal.py 当前仅支持 decoder.num_queries=2 的 object/placement 双 query 监督")
 
     runtime_cfg = dict(train_cfg.get("train", {}))
     if args.device is not None:
