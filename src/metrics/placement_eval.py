@@ -3,17 +3,17 @@ src/metrics/placement_eval.py
 -----------------------------
 放置预测结果评测工具函数。
 
-提供三类可复用指标：
+提供四类可复用指标：
 1. 预测 3D box 是否与上游 occupancy grid 中的 OCCUPIED 体素碰撞
 2. 预测放置方向是否符合结构化指令关系
 3. 预测 3D box 体积是否与目标物体体积一致
-4. 预测移动前物体中心是否接近 GT 中心
+4. 预测移动前物体中心投影点是否落在目标物体原始 3D 框投影区域内
 
 用法：
     from src.metrics.placement_eval import (
         evaluate_collision,
-        evaluate_center_alignment,
         evaluate_direction,
+        evaluate_projected_object_center,
         evaluate_size_consistency,
         summarize_metric_records,
     )
@@ -29,7 +29,7 @@ from src.annotation.bbox3d.bbox_utils import get_bbox_corners
 from src.annotation.free_bbox.datatypes import ObjectInfo
 from src.annotation.free_bbox.grid_ops import voxelize_obb
 from src.annotation.free_bbox.occupancy import OCCUPIED, UNKNOWN
-from src.utils.coord_utils import box7d_to_corners_world, rotation_z_3x3, transform_points
+from src.utils.coord_utils import box7d_to_corners_world, project_world, rotation_z_3x3, transform_points
 
 
 DEFAULT_COLLISION_RATIO_THRESHOLD = 0.003
@@ -82,6 +82,21 @@ def as_center3d(center_value: Sequence[float], name: str = "center") -> np.ndarr
     return center
 
 
+def as_corners3d(corners_value: Sequence[Sequence[float]], name: str = "corners") -> np.ndarray:
+    """
+    用法: corners = as_corners3d(record["target_object"]["corners_world"], "target_corners_world")
+    作用: 将输入校验并转换为 3D 角点数组
+    输入: corners_value: (N, 3) 数值序列，至少包含 3 个点；name: 报错字段名
+    输出: ndarray(N, 3)，世界坐标角点
+    """
+    corners = np.asarray(corners_value, dtype=np.float64)
+    if corners.ndim != 2 or corners.shape[1] != 3 or corners.shape[0] < 3:
+        raise ValueError(f"{name} must have shape (N,3) with N>=3, got {corners.shape}")
+    if not np.isfinite(corners).all():
+        raise ValueError(f"{name} contains non-finite values")
+    return corners
+
+
 def object_info_to_corners_world(obj: ObjectInfo) -> np.ndarray:
     """
     用法: corners = object_info_to_corners_world(scene.objects[0])
@@ -91,6 +106,177 @@ def object_info_to_corners_world(obj: ObjectInfo) -> np.ndarray:
     """
     corners_object = get_bbox_corners(np.asarray(obj.bbox3d_canonical, dtype=np.float64))
     return transform_points(corners_object, np.asarray(obj.pose_world, dtype=np.float64))
+
+
+def camera_to_projection_matrices(camera: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """
+    用法: K, E_w2c = camera_to_projection_matrices(sample["camera"])
+    作用: 从 benchmark camera 字段构造投影矩阵
+    输入: camera: dict，包含 fx/fy/cx/cy/E_c2w
+    输出: tuple，分别为 3x3 内参矩阵和 4x4 world->camera 外参矩阵
+    """
+    e_c2w = np.asarray(camera["E_c2w"], dtype=np.float64)
+    if e_c2w.shape != (4, 4):
+        raise ValueError(f"camera.E_c2w must have shape (4,4), got {e_c2w.shape}")
+    return (
+        np.array(
+            [
+                [float(camera["fx"]), 0.0, float(camera["cx"])],
+                [0.0, float(camera["fy"]), float(camera["cy"])],
+                [0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        ),
+        np.linalg.inv(e_c2w),
+    )
+
+
+def polygon_area_2d(points_uv: np.ndarray) -> float:
+    """
+    用法: area = polygon_area_2d(hull_uv)
+    作用: 计算二维多边形面积
+    输入: points_uv: (N, 2) 按边界顺序排列的顶点
+    输出: float，顶点不足 3 个时返回 0
+    """
+    points_uv = np.asarray(points_uv, dtype=np.float64)
+    if points_uv.shape[0] < 3:
+        return 0.0
+    x = points_uv[:, 0]
+    y = points_uv[:, 1]
+    return float(abs(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))))
+
+
+def _cross_2d(origin: np.ndarray, point_a: np.ndarray, point_b: np.ndarray) -> float:
+    """
+    用法: value = _cross_2d(origin, point_a, point_b)
+    作用: 计算二维向量 origin->point_a 与 origin->point_b 的叉积
+    输入: origin/point_a/point_b: (2,) 二维点
+    输出: float，叉积值
+    """
+    return float(
+        (point_a[0] - origin[0]) * (point_b[1] - origin[1])
+        - (point_a[1] - origin[1]) * (point_b[0] - origin[0])
+    )
+
+
+def convex_hull_2d(points_uv: np.ndarray) -> np.ndarray:
+    """
+    用法: hull = convex_hull_2d(projected_corners)
+    作用: 计算二维点集凸包，用于近似目标物体 3D 框投影区域
+    输入: points_uv: (N, 2) 像素坐标点
+    输出: ndarray(M, 2)，按边界顺序排列的凸包顶点
+    """
+    points = np.unique(np.asarray(points_uv, dtype=np.float64), axis=0)
+    if points.ndim != 2 or points.shape[1] != 2:
+        raise ValueError(f"points_uv must have shape (N,2), got {points.shape}")
+    if points.shape[0] <= 2:
+        return points
+
+    points = points[np.lexsort((points[:, 1], points[:, 0]))]
+    lower: list[np.ndarray] = []
+    for point in points:
+        while len(lower) >= 2 and _cross_2d(lower[-2], lower[-1], point) <= 0.0:
+            lower.pop()
+        lower.append(point)
+
+    upper: list[np.ndarray] = []
+    for point in reversed(points):
+        while len(upper) >= 2 and _cross_2d(upper[-2], upper[-1], point) <= 0.0:
+            upper.pop()
+        upper.append(point)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=np.float64)
+
+
+def point_in_convex_polygon(point_uv: np.ndarray, polygon_uv: np.ndarray, eps: float = 1e-6) -> bool:
+    """
+    用法: inside = point_in_convex_polygon(point_uv, hull_uv)
+    作用: 判断二维点是否在凸多边形内，边界点视为在内部
+    输入: point_uv: (2,) 像素点；polygon_uv: (N, 2) 凸包顶点；eps: 数值容差
+    输出: bool，True 表示点在凸包内部或边界上
+    """
+    point = np.asarray(point_uv, dtype=np.float64)
+    polygon = np.asarray(polygon_uv, dtype=np.float64)
+    if point.shape != (2,):
+        raise ValueError(f"point_uv must have shape (2,), got {point.shape}")
+    if polygon.ndim != 2 or polygon.shape[1] != 2 or polygon.shape[0] < 3:
+        raise ValueError(f"polygon_uv must have shape (N,2) with N>=3, got {polygon.shape}")
+    edges = np.roll(polygon, -1, axis=0) - polygon
+    rel = point - polygon
+    cross = edges[:, 0] * rel[:, 1] - edges[:, 1] * rel[:, 0]
+    return bool(np.all(cross >= -float(eps)) or np.all(cross <= float(eps)))
+
+
+def evaluate_projected_object_center(
+    pred_center_world: Sequence[float],
+    target_corners_world: Sequence[Sequence[float]],
+    camera: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    用法: result = evaluate_projected_object_center(pred_center, target_corners, camera)
+    作用: 判断预测物体中心投影点是否落在目标物体原始 3D 框的图像投影区域内
+    输入:
+        pred_center_world: 长度为 3 的预测世界坐标中心
+        target_corners_world: (N, 3) 目标物体原始 3D 框世界角点
+        camera: dict，包含 fx/fy/cx/cy/E_c2w
+    输出: dict，包含 center_match、pred_center_uv、target_projected_hull_uv 等字段
+    """
+    pred_center = as_center3d(pred_center_world, "pred_center_world")
+    target_corners = as_corners3d(target_corners_world, "target_corners_world")
+    k_matrix, e_w2c = camera_to_projection_matrices(camera)
+
+    pred_uv, pred_z = project_world(pred_center.reshape(1, 3), k_matrix, e_w2c)
+    target_uv, target_z = project_world(target_corners, k_matrix, e_w2c)
+    target_valid = (
+        (target_z > 0.0)
+        & np.isfinite(target_z)
+        & np.isfinite(target_uv[:, 0])
+        & np.isfinite(target_uv[:, 1])
+    )
+    target_visible_count = int(np.count_nonzero(target_valid))
+    if target_visible_count < 3:
+        return {
+            "evaluated": False,
+            "reason": "target object projected box has fewer than 3 valid corners in front of camera",
+            "center_match": False,
+            "target_corner_count": int(target_corners.shape[0]),
+            "target_visible_corner_count": target_visible_count,
+        }
+
+    hull_uv = convex_hull_2d(target_uv[target_valid])
+    hull_area_px2 = polygon_area_2d(hull_uv)
+    if hull_uv.shape[0] < 3 or hull_area_px2 <= 1e-8:
+        return {
+            "evaluated": False,
+            "reason": "target object projected box is degenerate",
+            "center_match": False,
+            "target_corner_count": int(target_corners.shape[0]),
+            "target_visible_corner_count": target_visible_count,
+            "target_projected_hull_uv": hull_uv.tolist(),
+            "target_projected_hull_area_px2": hull_area_px2,
+        }
+
+    pred_uv_value = pred_uv[0]
+    pred_depth = float(pred_z[0])
+    pred_projected = bool(
+        pred_depth > 0.0
+        and np.isfinite(pred_depth)
+        and np.isfinite(pred_uv_value).all()
+    )
+    center_inside = bool(
+        pred_projected and point_in_convex_polygon(pred_uv_value, hull_uv)
+    )
+    return {
+        "evaluated": True,
+        "center_match": center_inside,
+        "projected_center_in_target_box": center_inside,
+        "pred_center_projected": pred_projected,
+        "pred_center_uv": pred_uv_value.tolist() if np.isfinite(pred_uv_value).all() else None,
+        "pred_center_depth": pred_depth if np.isfinite(pred_depth) else None,
+        "target_projected_hull_uv": hull_uv.tolist(),
+        "target_projected_hull_area_px2": hull_area_px2,
+        "target_corner_count": int(target_corners.shape[0]),
+        "target_visible_corner_count": target_visible_count,
+    }
 
 
 def box7d_to_occupancy_voxels(
@@ -268,28 +454,6 @@ def evaluate_size_consistency(
         "volume_error_cm3": volume_error_cm3,
         "volume_error_ratio": volume_error_ratio,
         "volume_error_ratio_threshold": float(volume_error_ratio_threshold),
-    }
-
-
-def evaluate_center_alignment(
-    pred_center_world: Sequence[float],
-    target_center_world: Sequence[float],
-    center_l2_threshold_cm: float = DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
-) -> dict[str, Any]:
-    """
-    用法: result = evaluate_center_alignment(pred_center, gt_center, 10.0)
-    作用: 使用与放置中心直通逻辑一致的 L2 阈值评估 3D center 是否匹配
-    输入: pred_center_world/target_center_world: 长度 3 的世界坐标中心；center_l2_threshold_cm: 阈值
-    输出: dict，包含 center_match、center_l2_error_cm 与阈值
-    """
-    pred_center = as_center3d(pred_center_world, "pred_center_world")
-    target_center = as_center3d(target_center_world, "target_center_world")
-    center_l2_error_cm = float(np.linalg.norm(pred_center - target_center))
-    return {
-        "evaluated": True,
-        "center_match": bool(center_l2_error_cm <= float(center_l2_threshold_cm)),
-        "center_l2_error_cm": center_l2_error_cm,
-        "center_l2_threshold_cm": float(center_l2_threshold_cm),
     }
 
 
@@ -493,12 +657,6 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         for item in size_items
         if item.get("size", {}).get("volume_error_ratio") is not None
     ]
-    object_center_l2_errors_cm = [
-        float(item.get("object_center", {}).get("center_l2_error_cm", 0.0))
-        for item in object_center_items
-        if item.get("object_center", {}).get("center_l2_error_cm") is not None
-    ]
-
     return {
         "sample_count": sample_count,
         "full_metric_count": len(full_items),
@@ -527,8 +685,6 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         "median_volume_error_cm3": _safe_median(volume_errors_cm3),
         "mean_volume_error_ratio": _safe_mean(volume_error_ratios),
         "median_volume_error_ratio": _safe_median(volume_error_ratios),
-        "mean_object_center_l2_error_cm": _safe_mean(object_center_l2_errors_cm),
-        "median_object_center_l2_error_cm": _safe_median(object_center_l2_errors_cm),
     }
 
 

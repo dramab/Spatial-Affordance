@@ -67,9 +67,11 @@ from src.utils.coord_utils import box7d_to_corners_world, project_world, wrap_ya
 
 SCHEMA_VERSION = "multimodal_inference_predictions/v1"
 COLOR_PREDICTION = (0, 191, 255)
-COLOR_OBJECT_CENTER = (255, 128, 0)
+COLOR_OBJECT_CENTER = (255, 0, 180)
+COLOR_OBJECT_CENTER_OUTLINE = (255, 255, 255)
+COLOR_OBJECT_CENTER_BORDER = (0, 0, 0)
 LINE_WIDTH_PREDICTION = 4
-OBJECT_CENTER_RADIUS = 6
+OBJECT_CENTER_RADIUS = 12
 BOX_EDGES = [
     (0, 1), (2, 3), (4, 5), (6, 7),
     (0, 2), (1, 3), (4, 6), (5, 7),
@@ -414,8 +416,8 @@ def draw_projected_point(
         color: tuple[int, int, int],
         radius: int) -> None:
     """
-    用法: draw_projected_point(draw, center_world, K, E_w2c, (255, 128, 0), 6)
-    作用: 将 3D 世界坐标点投影到图像上并绘制粗圆点
+    用法: draw_projected_point(draw, center_world, K, E_w2c, (255, 0, 180), 12)
+    作用: 将 3D 世界坐标点投影到图像上并绘制高对比中心标记
     输入: draw: ImageDraw.ImageDraw；point_world: (3,)；K/E_w2c: 相机矩阵；color: RGB；radius: 圆点半径
     输出: None，点在相机后方时不绘制
     """
@@ -434,9 +436,19 @@ def draw_projected_point(
             (center_x - radius, center_y - radius),
             (center_x + radius, center_y + radius),
         ],
+        fill=COLOR_OBJECT_CENTER_OUTLINE,
+        outline=COLOR_OBJECT_CENTER_BORDER,
+        width=max(2, radius // 4),
+    )
+    inner_radius = max(2, radius // 2)
+    draw.ellipse(
+        [
+            (center_x - inner_radius, center_y - inner_radius),
+            (center_x + inner_radius, center_y + inner_radius),
+        ],
         fill=color,
-        outline=(0, 0, 0),
-        width=max(1, radius // 3),
+        outline=COLOR_OBJECT_CENTER_BORDER,
+        width=max(1, radius // 6),
     )
 
 

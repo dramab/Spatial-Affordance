@@ -12,8 +12,8 @@ tests/test_placement_eval.py
   验证 UNKNOWN 体素只记录覆盖比例，不按碰撞失败处理
 - test_evaluate_size_consistency_thresholds：
   验证体积相对误差阈值
-- test_evaluate_center_alignment_uses_l2_threshold：
-  验证中心点评测复用 L2 阈值逻辑
+- test_evaluate_projected_object_center_uses_target_box_projection：
+  验证中心点评测使用投影点是否落在目标物体 3D 框投影区域内
 - test_evaluate_direction_matches_auto_label_relation：
   验证方向 metric 复用 auto_label 空间关系逻辑
 - test_summarize_metric_records_reports_rates：
@@ -30,9 +30,9 @@ import numpy as np
 from src.annotation.free_bbox.datatypes import ObjectInfo
 from src.annotation.free_bbox.occupancy import OCCUPIED, UNKNOWN
 from src.metrics.placement_eval import (
-    evaluate_center_alignment,
     evaluate_collision,
     evaluate_direction,
+    evaluate_projected_object_center,
     evaluate_size_consistency,
     merge_sample_metric_status,
     object_info_to_corners_world,
@@ -194,29 +194,40 @@ def test_evaluate_size_consistency_thresholds():
     assert bad["volume_error_ratio"] > bad["volume_error_ratio_threshold"]
 
 
-def test_evaluate_center_alignment_uses_l2_threshold():
+def test_evaluate_projected_object_center_uses_target_box_projection():
     """
-    作用：验证移动前物体中心评测使用 L2 距离阈值。
+    作用：验证移动前物体中心评测使用二维投影点落框逻辑。
 
     输入：
-        无，内部构造预测中心和 GT 中心
+        无，内部构造预测中心、目标物体 3D 框和相机
     输出：
-        无，通过断言验证中心匹配结果
+        无，通过断言验证中心投影匹配结果
     """
-    good = evaluate_center_alignment(
-        pred_center_world=[1.0, 2.0, 3.0],
-        target_center_world=[1.0, 2.0, 3.5],
-        center_l2_threshold_cm=1.0,
+    target_obj = _make_object("target", (0.0, 0.0, 10.0))
+    camera = {
+        "fx": 100.0,
+        "fy": 100.0,
+        "cx": 100.0,
+        "cy": 100.0,
+        "E_c2w": np.eye(4, dtype=np.float64).tolist(),
+    }
+    corners_world = object_info_to_corners_world(target_obj)
+    good = evaluate_projected_object_center(
+        pred_center_world=[0.0, 0.0, 10.0],
+        target_corners_world=corners_world,
+        camera=camera,
     )
-    bad = evaluate_center_alignment(
-        pred_center_world=[1.0, 2.0, 3.0],
-        target_center_world=[1.0, 2.0, 5.0],
-        center_l2_threshold_cm=1.0,
+    bad = evaluate_projected_object_center(
+        pred_center_world=[3.0, 0.0, 10.0],
+        target_corners_world=corners_world,
+        camera=camera,
     )
 
     assert good["evaluated"] is True
     assert good["center_match"] is True
-    assert np.isclose(good["center_l2_error_cm"], 0.5)
+    assert good["projected_center_in_target_box"] is True
+    np.testing.assert_allclose(good["pred_center_uv"], [100.0, 100.0], atol=1e-6)
+    assert good["target_visible_corner_count"] == 8
     assert bad["center_match"] is False
 
 
@@ -311,7 +322,7 @@ def test_summarize_metric_records_reports_rates():
     first_object_center = {
         "evaluated": True,
         "center_match": True,
-        "center_l2_error_cm": 1.0,
+        "projected_center_in_target_box": True,
     }
     second_collision = {
         "evaluated": True,
@@ -329,7 +340,7 @@ def test_summarize_metric_records_reports_rates():
     second_object_center = {
         "evaluated": True,
         "center_match": False,
-        "center_l2_error_cm": 3.0,
+        "projected_center_in_target_box": False,
     }
     records = [
         {
@@ -375,4 +386,3 @@ def test_summarize_metric_records_reports_rates():
     assert np.isclose(summary["mean_unknown_overlap_ratio"], 0.05)
     assert np.isclose(summary["mean_volume_error_cm3"], 210.0)
     assert np.isclose(summary["mean_volume_error_ratio"], 0.035)
-    assert np.isclose(summary["mean_object_center_l2_error_cm"], 2.0)

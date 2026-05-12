@@ -146,6 +146,11 @@ benchmark/placement_v1/
   "sample_id": "scene_0000_0000_obj_1_p000",
   "source_name": "hope",
   "target_box_world": [cx, cy, cz, sx, sy, sz, yaw],
+  "target_object": {
+    "object_id": "obj_1",
+    "class_name": "target_class",
+    "corners_world": [[x0, y0, z0], ...]  // 目标物体原始 3D 框角点
+  },
   "camera": { "fx", "fy", "cx", "cy", "E_c2w", ... },
   "occupancy": {
     "path": "occupancy_grids/hope/scene_0000_0000.npy",
@@ -210,7 +215,7 @@ python scripts/infer_multimodal.py \
 
 ### 阶段 3：Benchmark 评测
 
-**目标**：基于 manifest 和 predictions.json 计算三类评测指标。
+**目标**：基于 manifest 和 predictions.json 计算四类评测指标。
 
 **入口**：`tools/evaluate_benchmark_predictions.py`
 
@@ -222,17 +227,19 @@ outputs/{experiment_name}_benchmark_eval/
 └── per_sample_metrics.csv   # CSV 格式（可选）
 ```
 
-#### 三类评测指标
+#### 四类评测指标
 
 | 指标 | 目标 | 计算方法 |
 |------|------|----------|
 | **Collision-Free** | 预测 box 是否与占据格中的 OCCUPIED 体素重叠 | 将 pred_box 体素化，统计落在 OCCUPIED 的比例，默认阈值 0.003 |
 | **Direction-Correct** | 预测位置是否满足指令中的目标方位关系 | 计算 pred_box 与 reference 的空间关系，与 expected_relation 比较 |
 | **Size-Consistent** | 预测 box 尺寸是否与目标物体一致 | 比较 pred_size 与 gt_size，默认最大单轴误差 ≤ 2cm |
+| **Object-Center-In-Target** | 预测移动前物体中心是否落在目标物体图像区域内 | 将 `pred_object_center_world` 投影为二维像素点，判断是否位于 `target_object.corners_world` 投影凸包内 |
 
 **主指标定义**：
 ```
 placement_success = collision_free AND direction_correct AND size_consistent
+overall_success = placement_success AND object_center_match
 ```
 
 **碰撞检测特殊处理**：根据 GT 最低体素层向下忽略 N 层桌面支撑层（默认 2 层），避免桌面本身误判为碰撞。
@@ -356,7 +363,7 @@ conda run -n spatial python tools/build_benchmark_site.py \
 | `scripts/infer_multimodal.py` | 模型推理入口 |
 | `tools/evaluate_benchmark_predictions.py` | 计算评测指标 |
 | `tools/build_benchmark_site.py` | 生成可视化网站（可选） |
-| `src/metrics/placement_eval.py` | 三大指标实现（collision/direction/size） |
+| `src/metrics/placement_eval.py` | 四类指标实现（collision/direction/size/object_center） |
 | `src/annotation/free_bbox/pipeline.py` | 放置规划 6 步流程 |
 | `src/annotation/free_bbox/occupancy.py` | 深度图→点云→占据格 |
 | `src/datasets/*_adapter.py` | 各数据集适配器 |

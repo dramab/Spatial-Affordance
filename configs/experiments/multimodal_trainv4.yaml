@@ -31,7 +31,7 @@ scheduler:
 loss:
   center_weight: 5
   object_center_weight: 5
-  size_weight: 5
+  size_weight: 10
   yaw_weight: 0.2
   smooth_l1_beta: 0.05
 
@@ -39,7 +39,7 @@ train:
   device: cuda
   seed: 42
   log_interval: 10
-  output_dir: outputs/model_voxel_3
+  output_dir: outputs/model_voxel_baseline_v2
   use_amp: false
   cudnn_benchmark: true
 

@@ -57,7 +57,7 @@ from src.annotation.bbox3d.bbox_utils import get_bbox_corners
 from src.utils.coord_utils import transform_points
 
 
-SCHEMA_VERSION = "placement_benchmark_manifest/v1"
+SCHEMA_VERSION = "placement_benchmark_manifest/v2"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -155,23 +155,28 @@ def load_annotation_samples(annotation_dir: Path, split: str) -> list[dict[str, 
     return list(payload.get("samples", []))
 
 
-def find_scene_object(scene_objects_payload: Mapping[str, Any], object_id: str, path: Path) -> dict[str, Any]:
+def find_scene_object(
+    scene_objects_payload: Mapping[str, Any],
+    object_id: str,
+    path: Path,
+    role: str = "object",
+) -> dict[str, Any]:
     """
-    用法: obj = find_scene_object(payload, "obj_1", path)
+    用法: obj = find_scene_object(payload, "obj_1", path, "reference object")
     作用: 在 scene_objects payload 中查找指定 object_id
-    输入: scene_objects_payload: dict；object_id: str；path: Path，用于报错
+    输入: scene_objects_payload: dict；object_id: str；path: Path，用于报错；role: 报错角色名
     输出: dict，物体记录
     """
     for record in scene_objects_payload.get("objects", []):
         if str(record.get("object_id")) == str(object_id):
             return dict(record)
-    raise KeyError(f"reference object {object_id} not found in {path}")
+    raise KeyError(f"{role} {object_id} not found in {path}")
 
 
-def get_reference_corners_world(object_record: Mapping[str, Any]) -> list[list[float]]:
+def get_object_corners_world(object_record: Mapping[str, Any]) -> list[list[float]]:
     """
-    用法: corners = get_reference_corners_world(object_record)
-    作用: 获取或由 canonical AABB 和 pose_world 计算 reference 世界角点
+    用法: corners = get_object_corners_world(object_record)
+    作用: 获取或由 canonical AABB 和 pose_world 计算物体世界角点
     输入: object_record: scene_objects 中的物体记录
     输出: list[list[float]]，8 个世界坐标角点
     """
@@ -243,7 +248,10 @@ def build_manifest_sample(
 
     grid_meta = load_json(grid_meta_path)
     scene_objects = load_json(scene_objects_path)
-    reference_object = find_scene_object(scene_objects, str(reference_id), scene_objects_path)
+    if object_id is None:
+        raise ValueError(f"missing target object_id for {label_key}")
+    target_object = find_scene_object(scene_objects, str(object_id), scene_objects_path, "target object")
+    reference_object = find_scene_object(scene_objects, str(reference_id), scene_objects_path, "reference object")
     occupancy_rel_path = copy_occupancy_grid(
         occupancy_source_path,
         output_dir=output_dir,
@@ -259,11 +267,10 @@ def build_manifest_sample(
     placement = sample.get("placement", {})
     if "target_box" not in placement:
         raise ValueError(f"missing placement.target_box for {label_key}")
-    if "object_center" not in placement:
-        raise ValueError(f"missing placement.object_center for {label_key}")
     camera = sample.get("camera") or grid_meta.get("camera")
     if not isinstance(camera, dict):
         raise ValueError(f"missing camera for {label_key}")
+    target_class_name = target_object.get("class_name", sample.get("class_name"))
 
     return {
         "sample_id": sample_id,
@@ -277,7 +284,11 @@ def build_manifest_sample(
         "rgb_path": sample.get("rgb_path"),
         "point_cloud_path": sample.get("point_cloud_path"),
         "target_box_world": list(placement["target_box"]),
-        "object_center_world": list(placement["object_center"]),
+        "target_object": {
+            "object_id": str(object_id),
+            "class_name": None if target_class_name is None else str(target_class_name),
+            "corners_world": get_object_corners_world(target_object),
+        },
         "camera": camera,
         "occupancy": {
             "path": occupancy_rel_path,
@@ -291,7 +302,7 @@ def build_manifest_sample(
             "reference_object_id": str(reference_id),
             "reference_class_name": placement_relation.get("reference_class_name"),
             "reference_name": placement_relation.get("reference_name"),
-            "reference_corners_world": get_reference_corners_world(reference_object),
+            "reference_corners_world": get_object_corners_world(reference_object),
         },
     }
 

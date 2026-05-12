@@ -405,12 +405,12 @@ def test_denormalize_world_box_exp_recovers_log_size_norm():
 
 def test_save_prediction_visualization_draws_object_center_dot(tmp_path):
     """
-    作用：验证推理可视化会用粗圆点绘制预测移动前物体中心。
+    作用：验证推理可视化会用高对比圆点绘制预测移动前物体中心。
 
     输入：
         tmp_path: pytest 临时目录
     输出：
-        无，通过中心像素颜色断言验证结果
+        无，通过中心像素与外圈颜色断言验证结果
     """
     rgb_path = tmp_path / "input.png"
     output_path = tmp_path / "vis.png"
@@ -435,6 +435,7 @@ def test_save_prediction_visualization_draws_object_center_dot(tmp_path):
 
     image = np.asarray(Image.open(output_path).convert("RGB"))
     assert tuple(image[12, 16].tolist()) == infer_multimodal.COLOR_OBJECT_CENTER
+    assert tuple(image[12, 25].tolist()) == infer_multimodal.COLOR_OBJECT_CENTER_OUTLINE
 
 
 def test_infer_multimodal_exports_predictions_and_visualizations(tmp_path, monkeypatch):

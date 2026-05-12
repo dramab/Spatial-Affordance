@@ -70,7 +70,7 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
     _write_json(
         benchmark_dir / "manifest.json",
         {
-            "schema_version": "placement_benchmark_manifest/v1",
+            "schema_version": "placement_benchmark_manifest/v2",
             "split": "test",
             "sample_count": 1,
             "samples": [
@@ -81,7 +81,14 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
                     "frame_id": "0000",
                     "object_id": "obj_0",
                     "target_box_world": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0],
-                    "object_center_world": [1.0, 2.0, 3.0],
+                    "target_object": {
+                        "object_id": "obj_0",
+                        "class_name": "Target",
+                        "corners_world": [
+                            [0, 1, 2], [0, 3, 2], [2, 1, 2], [2, 3, 2],
+                            [0, 1, 4], [0, 3, 4], [2, 1, 4], [2, 3, 4],
+                        ],
+                    },
                     "camera": camera,
                     "occupancy": {
                         "path": occupancy_rel,
@@ -144,7 +151,8 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
     assert per_sample["direction"]["center_match"] is True
     assert per_sample["object_center"]["evaluated"] is True
     assert per_sample["object_center"]["center_match"] is True
-    assert per_sample["object_center"]["center_l2_error_cm"] == 0.0
+    assert per_sample["object_center"]["projected_center_in_target_box"] is True
+    assert per_sample["object_center"]["target_object_id"] == "obj_0"
     assert per_sample["status"]["placement_success"] is True
     assert per_sample["status"]["object_center_success"] is True
     assert per_sample["status"]["overall_success"] is True

@@ -296,8 +296,13 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
         "object_center_evaluated": bool(status.get("object_center_evaluated")),
         "object_center_match": bool(object_center.get("center_match")),
-        "object_center_l2_error_cm": object_center.get("center_l2_error_cm"),
-        "object_center_l2_threshold_cm": object_center.get("center_l2_threshold_cm"),
+        "projected_center_in_target_box": object_center.get("projected_center_in_target_box"),
+        "pred_center_projected": object_center.get("pred_center_projected"),
+        "pred_center_uv": object_center.get("pred_center_uv", []),
+        "pred_center_depth": object_center.get("pred_center_depth"),
+        "target_projected_hull_area_px2": object_center.get("target_projected_hull_area_px2"),
+        "target_visible_corner_count": object_center.get("target_visible_corner_count"),
+        "target_object_id": object_center.get("target_object_id", sample.get("object_id", "")),
         "pred_box_world": prediction.get("pred_box_world", []),
         "gt_box_world": prediction.get("gt_box_world", []),
         "pred_object_center_world": prediction.get("pred_object_center_world", []),
@@ -442,6 +447,7 @@ def render_html(title: str) -> str:
             <option value="collision_failed">碰撞失败</option>
             <option value="direction_wrong">方向错误</option>
             <option value="size_inconsistent">体积不一致</option>
+            <option value="object_center_failed">中心定位失败</option>
             <option value="missing_image">缺失图片</option>
           </select>
         </label>
@@ -1017,6 +1023,7 @@ const passStatus = (item, status) => {
   if (status === "collision_failed") return item.collision_evaluated && !item.collision_free;
   if (status === "direction_wrong") return item.direction_evaluated && !item.direction_correct;
   if (status === "size_inconsistent") return item.size_evaluated && !item.size_consistent;
+  if (status === "object_center_failed") return item.object_center_evaluated && !item.object_center_match;
   if (status === "missing_image") return !item.has_image;
   return true;
 };
@@ -1068,6 +1075,12 @@ const renderBadges = (item) => {
     item.size_consistent,
     formatMetricPair(item.volume_error_ratio, item.volume_error_ratio_threshold, (value) => formatPercent(value)),
   ));
+  badges.push(makeMetricBadge(
+    "object center",
+    item.object_center_evaluated,
+    item.object_center_match,
+    item.pred_center_projected ? "projected" : "not projected",
+  ));
   if (!item.has_image) badges.push(makeBadge("missing image", "bad"));
   return badges.join("");
 };
@@ -1080,6 +1093,8 @@ const renderSummary = () => {
     ["无碰撞率", formatPercent(summary.collision_free_rate)],
     ["方向正确率", formatPercent(summary.direction_correct_rate)],
     ["体积一致率", formatPercent(summary.size_consistent_rate)],
+    ["中心定位率", formatPercent(summary.object_center_match_rate)],
+    ["总成功率", formatPercent(summary.overall_success_rate)],
     ["平均碰撞率", formatPercent(summary.mean_occupied_collision_ratio)],
   ];
   els.summaryCards.innerHTML = cards.map(([label, value]) => `
@@ -1188,6 +1203,15 @@ const openDialog = (item) => {
     ["volume error cm3", formatCm(item.volume_error_cm3, 3)],
     ["volume error ratio", formatPercent(item.volume_error_ratio)],
     ["volume error ratio threshold", formatPercent(item.volume_error_ratio_threshold)],
+    ["object center evaluated", item.object_center_evaluated ? "yes" : "no"],
+    ["object center match", item.object_center_match ? "yes" : "no"],
+    ["target object", item.target_object_id],
+    ["projected center in target box", item.projected_center_in_target_box ? "yes" : "no"],
+    ["pred center projected", item.pred_center_projected ? "yes" : "no"],
+    ["pred center uv", Array.isArray(item.pred_center_uv) ? item.pred_center_uv.join(", ") : ""],
+    ["pred center depth", formatCm(item.pred_center_depth, 3)],
+    ["target projected hull area px2", formatNumber(item.target_projected_hull_area_px2, 3)],
+    ["target visible corner count", item.target_visible_corner_count],
     ["vis path", item.vis_path],
   ];
   els.dialogMetrics.innerHTML = fields.map(([key, value]) => `<dt>${key}</dt><dd>${value || "N/A"}</dd>`).join("");

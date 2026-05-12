@@ -53,9 +53,9 @@ from src.metrics.placement_eval import (
     DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
     DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
     DEFAULT_SUPPORT_IGNORE_LAYERS,
-    evaluate_center_alignment,
     evaluate_collision,
     evaluate_direction,
+    evaluate_projected_object_center,
     evaluate_size_consistency,
     merge_sample_metric_status,
     summarize_by_source,
@@ -63,7 +63,7 @@ from src.metrics.placement_eval import (
 )
 
 
-SCHEMA_VERSION = "placement_benchmark_metrics/v1"
+SCHEMA_VERSION = "placement_benchmark_metrics/v2"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,11 +291,14 @@ def evaluate_one_prediction(
         errors.append(str(exc))
 
     try:
-        object_center_result = evaluate_center_alignment(
+        target_object = benchmark_sample["target_object"]
+        object_center_result = evaluate_projected_object_center(
             pred_center_world=require_prediction_field(prediction, "pred_object_center_world"),
-            target_center_world=benchmark_sample["object_center_world"],
-            center_l2_threshold_cm=args.direction_center_l2_threshold_cm,
+            target_corners_world=target_object["corners_world"],
+            camera=benchmark_sample["camera"],
         )
+        object_center_result["target_object_id"] = str(target_object["object_id"])
+        object_center_result["target_class_name"] = target_object.get("class_name")
     except Exception as exc:
         object_center_result = make_skip_result(f"object_center metric failed: {exc}")
         errors.append(str(exc))
@@ -359,8 +362,9 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
         "center_l2_error_cm", "center_l2_threshold_cm", "expected_relation", "pred_relation", "reference_object_id",
         "size_evaluated", "size_consistent", "pred_volume_cm3", "target_volume_cm3",
         "volume_error_cm3", "volume_error_ratio", "volume_error_ratio_threshold",
-        "object_center_evaluated", "object_center_match", "object_center_l2_error_cm",
-        "object_center_l2_threshold_cm",
+        "object_center_evaluated", "object_center_match", "projected_center_in_target_box",
+        "pred_center_projected", "pred_center_u", "pred_center_v", "pred_center_depth",
+        "target_projected_hull_area_px2", "target_visible_corner_count", "target_object_id",
     ]
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -370,6 +374,7 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
             direction = record.get("direction", {})
             size = record.get("size", {})
             object_center = record.get("object_center", {})
+            pred_center_uv = object_center.get("pred_center_uv") or [None, None]
             status = record.get("status", {})
             writer.writerow({
                 "sample_id": record.get("sample_id"),
@@ -401,8 +406,14 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
                 "object_center_evaluated": object_center.get("evaluated"),
                 "object_center_match": object_center.get("center_match"),
-                "object_center_l2_error_cm": object_center.get("center_l2_error_cm"),
-                "object_center_l2_threshold_cm": object_center.get("center_l2_threshold_cm"),
+                "projected_center_in_target_box": object_center.get("projected_center_in_target_box"),
+                "pred_center_projected": object_center.get("pred_center_projected"),
+                "pred_center_u": pred_center_uv[0],
+                "pred_center_v": pred_center_uv[1],
+                "pred_center_depth": object_center.get("pred_center_depth"),
+                "target_projected_hull_area_px2": object_center.get("target_projected_hull_area_px2"),
+                "target_visible_corner_count": object_center.get("target_visible_corner_count"),
+                "target_object_id": object_center.get("target_object_id"),
             })
 
 
@@ -453,7 +464,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             "support_ignore_layers": int(args.support_ignore_layers),
             "volume_error_ratio_threshold": float(args.volume_error_ratio_threshold),
             "direction_center_l2_threshold_cm": float(args.direction_center_l2_threshold_cm),
-            "object_center_l2_threshold_cm": float(args.direction_center_l2_threshold_cm),
+            "object_center_pass_rule": "pred_object_center_world projected point inside target_object.corners_world projected hull",
         },
         "sample_count": len(per_sample_records),
         "summary": summarize_metric_records(per_sample_records),

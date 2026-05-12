@@ -5,7 +5,7 @@ tests/test_build_benchmark_manifest.py
 
 测试内容：
 - test_build_benchmark_manifest_writes_self_contained_metric_inputs：
-  验证 manifest 固化 target、camera、occupancy 和 reference corners
+  验证 manifest 固化 target box、target object、camera、occupancy 和 reference corners
 - test_build_benchmark_manifest_requires_reference_object：
   验证缺少 reference object 时明确报错
 
@@ -89,7 +89,6 @@ def _write_minimal_inputs(tmp_path: Path, reference_id: str = "obj_1") -> tuple[
                     "polished_prompt": "",
                     "placement": {
                         "target_box": [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0],
-                        "object_center": [1.0, 2.0, 3.0],
                     },
                     "camera": camera,
                 }
@@ -179,9 +178,13 @@ def test_build_benchmark_manifest_writes_self_contained_metric_inputs(tmp_path, 
     )
 
     sample = payload["samples"][0]
+    assert payload["schema_version"] == "placement_benchmark_manifest/v2"
     assert payload["sample_count"] == 1
     assert sample["target_box_world"] == [4.0, 0.0, 2.0, 2.0, 2.0, 2.0, 0.0]
-    assert sample["object_center_world"] == [1.0, 2.0, 3.0]
+    assert "object_center_world" not in sample
+    assert sample["target_object"]["object_id"] == "obj_0"
+    assert sample["target_object"]["class_name"] == "Target"
+    assert len(sample["target_object"]["corners_world"]) == 8
     assert sample["direction"]["expected_relation"] == "the right of"
     assert sample["direction"]["reference_object_id"] == "obj_1"
     assert len(sample["direction"]["reference_corners_world"]) == 8
