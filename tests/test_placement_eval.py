@@ -11,7 +11,7 @@ tests/test_placement_eval.py
 - test_evaluate_collision_reports_unknown_overlap：
   验证 UNKNOWN 体素只记录覆盖比例，不按碰撞失败处理
 - test_evaluate_size_consistency_thresholds：
-  验证体积相对误差阈值
+  验证体积相对误差和三轴尺寸总误差阈值
 - test_evaluate_projected_object_center_uses_target_box_projection：
   验证中心点评测使用投影点是否落在目标物体 3D 框投影区域内
 - test_evaluate_direction_matches_auto_label_relation：
@@ -172,7 +172,7 @@ def test_evaluate_collision_reports_unknown_overlap():
 
 def test_evaluate_size_consistency_thresholds():
     """
-    作用：验证尺寸一致性按体积相对误差阈值判断。
+    作用：验证尺寸一致性按体积相对误差和三轴尺寸总误差阈值判断。
 
     输入：
         无，内部构造预测和 GT box
@@ -182,16 +182,40 @@ def test_evaluate_size_consistency_thresholds():
     gt_box = [0.0, 0.0, 0.0, 10.0, 20.0, 30.0, 0.0]
     good_pred = [0.0, 0.0, 0.0, 11.0, 20.0, 30.0, 0.0]
     bad_pred = [0.0, 0.0, 0.0, 13.0, 20.0, 30.0, 0.0]
+    bad_axis_pred = [0.0, 0.0, 0.0, 12.0, 20.0, 25.0, 0.0]
 
-    good = evaluate_size_consistency(good_pred, gt_box, volume_error_ratio_threshold=0.15)
-    bad = evaluate_size_consistency(bad_pred, gt_box, volume_error_ratio_threshold=0.15)
+    good = evaluate_size_consistency(
+        good_pred,
+        gt_box,
+        volume_error_ratio_threshold=0.15,
+        axis_size_error_sum_threshold_cm=1.5,
+    )
+    bad = evaluate_size_consistency(
+        bad_pred,
+        gt_box,
+        volume_error_ratio_threshold=0.15,
+        axis_size_error_sum_threshold_cm=4.0,
+    )
+    bad_axis = evaluate_size_consistency(
+        bad_axis_pred,
+        gt_box,
+        volume_error_ratio_threshold=0.01,
+        axis_size_error_sum_threshold_cm=6.0,
+    )
 
     assert good["size_consistent"] is True
     assert bad["size_consistent"] is False
+    assert bad_axis["size_consistent"] is False
     assert np.isclose(good["pred_volume_cm3"], 6600.0)
     assert np.isclose(good["target_volume_cm3"], 6000.0)
     assert np.isclose(good["volume_error_ratio"], 0.1)
+    assert np.allclose(good["axis_size_errors_cm"], [1.0, 0.0, 0.0])
+    assert np.isclose(good["axis_size_error_sum_cm"], 1.0)
     assert bad["volume_error_ratio"] > bad["volume_error_ratio_threshold"]
+    assert bad_axis["volume_pass"] is True
+    assert bad_axis["axis_size_pass"] is False
+    assert np.isclose(bad_axis["volume_error_ratio"], 0.0)
+    assert np.isclose(bad_axis["axis_size_error_sum_cm"], 7.0)
 
 
 def test_evaluate_projected_object_center_uses_target_box_projection():
@@ -318,6 +342,7 @@ def test_summarize_metric_records_reports_rates():
         "size_consistent": True,
         "volume_error_cm3": 300.0,
         "volume_error_ratio": 0.05,
+        "axis_size_error_sum_cm": 3.0,
     }
     first_object_center = {
         "evaluated": True,
@@ -336,6 +361,7 @@ def test_summarize_metric_records_reports_rates():
         "size_consistent": True,
         "volume_error_cm3": 120.0,
         "volume_error_ratio": 0.02,
+        "axis_size_error_sum_cm": 1.0,
     }
     second_object_center = {
         "evaluated": True,
@@ -386,3 +412,4 @@ def test_summarize_metric_records_reports_rates():
     assert np.isclose(summary["mean_unknown_overlap_ratio"], 0.05)
     assert np.isclose(summary["mean_volume_error_cm3"], 210.0)
     assert np.isclose(summary["mean_volume_error_ratio"], 0.035)
+    assert np.isclose(summary["mean_axis_size_error_sum_cm"], 2.0)

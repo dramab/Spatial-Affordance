@@ -233,7 +233,7 @@ outputs/{experiment_name}_benchmark_eval/
 |------|------|----------|
 | **Collision-Free** | 预测 box 是否与占据格中的 OCCUPIED 体素重叠 | 将 pred_box 体素化，统计落在 OCCUPIED 的比例，默认阈值 0.003 |
 | **Direction-Correct** | 预测位置是否满足指令中的目标方位关系 | 计算 pred_box 与 reference 的空间关系，与 expected_relation 比较 |
-| **Size-Consistent** | 预测 box 尺寸是否与目标物体一致 | 比较 pred_size 与 gt_size，默认最大单轴误差 ≤ 2cm |
+| **Size-Consistent** | 预测 box 尺寸是否与目标物体一致 | 同时约束体积相对误差和三轴尺寸绝对误差之和，默认阈值分别为 0.1 和 5cm |
 | **Object-Center-In-Target** | 预测移动前物体中心是否落在目标物体图像区域内 | 将 `pred_object_center_world` 投影为二维像素点，判断是否位于 `target_object.corners_world` 投影凸包内 |
 
 **主指标定义**：
@@ -274,7 +274,8 @@ python tools/evaluate_benchmark_predictions.py \
     --predictions outputs/infer_ptv3/predictions.json \
     --output-dir outputs/infer_ptv3_benchmark_eval \
     --collision-ratio-threshold 0.005 \
-    --volume-error-ratio-threshold 0.1
+    --volume-error-ratio-threshold 0.1 \
+    --axis-size-error-sum-threshold-cm 5.0
 ```
 
 ---

@@ -294,6 +294,9 @@ def summarize_sample(sample: dict[str, Any], prediction: dict[str, Any], image_p
         "volume_error_cm3": size.get("volume_error_cm3"),
         "volume_error_ratio": size.get("volume_error_ratio"),
         "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
+        "axis_size_errors_cm": size.get("axis_size_errors_cm", []),
+        "axis_size_error_sum_cm": size.get("axis_size_error_sum_cm"),
+        "axis_size_error_sum_threshold_cm": size.get("axis_size_error_sum_threshold_cm"),
         "object_center_evaluated": bool(status.get("object_center_evaluated")),
         "object_center_match": bool(object_center.get("center_match")),
         "projected_center_in_target_box": object_center.get("projected_center_in_target_box"),
@@ -1000,6 +1003,22 @@ const formatMetricPair = (value, threshold, formatter) => {
   return `${valueText} / ${thresholdText}`;
 };
 
+const formatSizeMetric = (item) => {
+  const volumeText = formatMetricPair(
+    item.volume_error_ratio,
+    item.volume_error_ratio_threshold,
+    (value) => formatPercent(value),
+  );
+  const axisText = formatMetricPair(
+    item.axis_size_error_sum_cm,
+    item.axis_size_error_sum_threshold_cm,
+    (value) => formatCm(value, 2),
+  );
+  if (volumeText === "N/A") return axisText;
+  if (axisText === "N/A") return volumeText;
+  return `vol ${volumeText}, axis ${axisText}`;
+};
+
 const metricState = (evaluated, passed) => {
   if (!evaluated) return { text: "not eval", kind: "neutral" };
   return passed ? { text: "pass", kind: "good" } : { text: "fail", kind: "bad" };
@@ -1038,7 +1057,10 @@ const sortItems = (list, mode) => {
   } else if (mode === "direction_desc") {
     sorted.sort((a, b) => num(b.center_l2_error_cm) - num(a.center_l2_error_cm));
   } else if (mode === "size_error_desc") {
-    sorted.sort((a, b) => num(b.volume_error_ratio) - num(a.volume_error_ratio));
+    sorted.sort((a, b) => (
+      num(b.axis_size_error_sum_cm ?? b.volume_error_ratio)
+      - num(a.axis_size_error_sum_cm ?? a.volume_error_ratio)
+    ));
   } else if (mode === "source") {
     sorted.sort((a, b) => `${a.source_name} ${a.sample_id}`.localeCompare(`${b.source_name} ${b.sample_id}`));
   }
@@ -1073,7 +1095,7 @@ const renderBadges = (item) => {
     "size",
     item.size_evaluated,
     item.size_consistent,
-    formatMetricPair(item.volume_error_ratio, item.volume_error_ratio_threshold, (value) => formatPercent(value)),
+    formatSizeMetric(item),
   ));
   badges.push(makeMetricBadge(
     "object center",
@@ -1203,6 +1225,11 @@ const openDialog = (item) => {
     ["volume error cm3", formatCm(item.volume_error_cm3, 3)],
     ["volume error ratio", formatPercent(item.volume_error_ratio)],
     ["volume error ratio threshold", formatPercent(item.volume_error_ratio_threshold)],
+    ["axis size error x cm", formatCm(item.axis_size_errors_cm?.[0], 3)],
+    ["axis size error y cm", formatCm(item.axis_size_errors_cm?.[1], 3)],
+    ["axis size error z cm", formatCm(item.axis_size_errors_cm?.[2], 3)],
+    ["axis size error sum cm", formatCm(item.axis_size_error_sum_cm, 3)],
+    ["axis size error sum threshold cm", formatCm(item.axis_size_error_sum_threshold_cm, 3)],
     ["object center evaluated", item.object_center_evaluated ? "yes" : "no"],
     ["object center match", item.object_center_match ? "yes" : "no"],
     ["target object", item.target_object_id],

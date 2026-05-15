@@ -133,6 +133,7 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
         collision_ratio_threshold=0.01,
         support_ignore_layers=2,
         volume_error_ratio_threshold=0.05,
+        axis_size_error_sum_threshold_cm=5.0,
         direction_center_l2_threshold_cm=1.0,
         write_csv=True,
     )
@@ -147,6 +148,8 @@ def test_evaluate_benchmark_predictions_uses_only_manifest(tmp_path, monkeypatch
     assert per_sample["size"]["size_consistent"] is True
     assert per_sample["size"]["volume_error_ratio_threshold"] == 0.05
     assert per_sample["size"]["volume_error_ratio"] == 0.0
+    assert per_sample["size"]["axis_size_error_sum_threshold_cm"] == 5.0
+    assert per_sample["size"]["axis_size_error_sum_cm"] == 0.0
     assert per_sample["direction"]["direction_correct"] is True
     assert per_sample["direction"]["center_match"] is True
     assert per_sample["object_center"]["evaluated"] is True

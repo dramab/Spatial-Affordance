@@ -20,6 +20,7 @@ tools/evaluate_benchmark_predictions.py
     --benchmark-dir: build_benchmark_manifest.py 生成的 benchmark 目录
     --predictions: infer_multimodal.py 导出的 predictions.json
     --output-dir: 评测结果输出目录
+    --axis-size-error-sum-threshold-cm: 可选，三轴尺寸绝对误差之和阈值
 
 输出:
     output-dir/
@@ -31,7 +32,8 @@ tools/evaluate_benchmark_predictions.py
     conda run -n spatial python tools/evaluate_benchmark_predictions.py \
         --benchmark-dir benchmark/placement_v1 \
         --predictions outputs/infer_ptv3/predictions.json \
-        --output-dir outputs/infer_ptv3_benchmark_eval
+        --output-dir outputs/infer_ptv3_benchmark_eval \
+        --axis-size-error-sum-threshold-cm 5.0
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.metrics.placement_eval import (
+    DEFAULT_AXIS_SIZE_ERROR_SUM_THRESHOLD_CM,
     DEFAULT_COLLISION_RATIO_THRESHOLD,
     DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM,
     DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
@@ -87,6 +90,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
         help="预测体积相对 GT 体积误差阈值",
+    )
+    parser.add_argument(
+        "--axis-size-error-sum-threshold-cm",
+        type=float,
+        default=DEFAULT_AXIS_SIZE_ERROR_SUM_THRESHOLD_CM,
+        help="预测三轴尺寸绝对误差之和阈值，单位 cm",
     )
     parser.add_argument(
         "--direction-center-l2-threshold-cm",
@@ -253,6 +262,7 @@ def evaluate_one_prediction(
             pred_box_world=pred_box,
             target_box_world=benchmark_sample["target_box_world"],
             volume_error_ratio_threshold=args.volume_error_ratio_threshold,
+            axis_size_error_sum_threshold_cm=args.axis_size_error_sum_threshold_cm,
         )
     except Exception as exc:
         size_result = make_skip_result(f"size metric failed: {exc}")
@@ -362,6 +372,8 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
         "center_l2_error_cm", "center_l2_threshold_cm", "expected_relation", "pred_relation", "reference_object_id",
         "size_evaluated", "size_consistent", "pred_volume_cm3", "target_volume_cm3",
         "volume_error_cm3", "volume_error_ratio", "volume_error_ratio_threshold",
+        "axis_size_error_x_cm", "axis_size_error_y_cm", "axis_size_error_z_cm",
+        "axis_size_error_sum_cm", "axis_size_error_sum_threshold_cm",
         "object_center_evaluated", "object_center_match", "projected_center_in_target_box",
         "pred_center_projected", "pred_center_u", "pred_center_v", "pred_center_depth",
         "target_projected_hull_area_px2", "target_visible_corner_count", "target_object_id",
@@ -375,6 +387,8 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
             size = record.get("size", {})
             object_center = record.get("object_center", {})
             pred_center_uv = object_center.get("pred_center_uv") or [None, None]
+            axis_size_errors = list(size.get("axis_size_errors_cm") or [])
+            axis_size_errors = (axis_size_errors + [None, None, None])[:3]
             status = record.get("status", {})
             writer.writerow({
                 "sample_id": record.get("sample_id"),
@@ -404,6 +418,11 @@ def write_per_sample_csv(output_path: Path, records: Iterable[Mapping[str, Any]]
                 "volume_error_cm3": size.get("volume_error_cm3"),
                 "volume_error_ratio": size.get("volume_error_ratio"),
                 "volume_error_ratio_threshold": size.get("volume_error_ratio_threshold"),
+                "axis_size_error_x_cm": axis_size_errors[0],
+                "axis_size_error_y_cm": axis_size_errors[1],
+                "axis_size_error_z_cm": axis_size_errors[2],
+                "axis_size_error_sum_cm": size.get("axis_size_error_sum_cm"),
+                "axis_size_error_sum_threshold_cm": size.get("axis_size_error_sum_threshold_cm"),
                 "object_center_evaluated": object_center.get("evaluated"),
                 "object_center_match": object_center.get("center_match"),
                 "projected_center_in_target_box": object_center.get("projected_center_in_target_box"),
@@ -463,6 +482,11 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             "collision_pass_rule": "occupied_collision_ratio <= collision_ratio_threshold",
             "support_ignore_layers": int(args.support_ignore_layers),
             "volume_error_ratio_threshold": float(args.volume_error_ratio_threshold),
+            "axis_size_error_sum_threshold_cm": float(args.axis_size_error_sum_threshold_cm),
+            "size_pass_rule": (
+                "volume_error_ratio <= volume_error_ratio_threshold and "
+                "axis_size_error_sum_cm <= axis_size_error_sum_threshold_cm"
+            ),
             "direction_center_l2_threshold_cm": float(args.direction_center_l2_threshold_cm),
             "object_center_pass_rule": "pred_object_center_world projected point inside target_object.corners_world projected hull",
         },

@@ -34,6 +34,7 @@ from src.utils.coord_utils import box7d_to_corners_world, project_world, rotatio
 
 DEFAULT_COLLISION_RATIO_THRESHOLD = 0.003
 DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD = 0.1
+DEFAULT_AXIS_SIZE_ERROR_SUM_THRESHOLD_CM = 5.0
 DEFAULT_DIRECTION_CENTER_L2_THRESHOLD_CM = 10.0
 DEFAULT_SUPPORT_IGNORE_LAYERS = 4
 
@@ -428,32 +429,49 @@ def evaluate_size_consistency(
     pred_box_world: Sequence[float],
     target_box_world: Sequence[float],
     volume_error_ratio_threshold: float = DEFAULT_VOLUME_ERROR_RATIO_THRESHOLD,
+    axis_size_error_sum_threshold_cm: float = DEFAULT_AXIS_SIZE_ERROR_SUM_THRESHOLD_CM,
 ) -> dict[str, Any]:
     """
     用法: result = evaluate_size_consistency(pred_box, gt_box)
-    作用: 评估预测 box 体积是否与目标 box 体积一致
+    作用: 评估预测 box 体积和三轴尺寸绝对误差之和是否与目标 box 一致
     输入:
         pred_box_world: 长度 7 的预测世界坐标 box
         target_box_world: 长度 7 的 GT 世界坐标 box
         volume_error_ratio_threshold: 预测体积相对 GT 体积误差阈值
+        axis_size_error_sum_threshold_cm: 三轴尺寸绝对误差之和阈值，单位 cm
     输出: dict，包含 size_consistent、pred_volume_cm3、target_volume_cm3、
-         volume_error_cm3、volume_error_ratio、volume_error_ratio_threshold
+         volume_error_ratio、axis_size_error_sum_cm 与对应阈值
     """
     pred_box = as_box7d(pred_box_world, "pred_box_world")
     target_box = as_box7d(target_box_world, "target_box_world")
-    pred_volume_cm3 = float(np.prod(pred_box[3:6]))
-    target_volume_cm3 = float(np.prod(target_box[3:6]))
+    pred_size = pred_box[3:6]
+    target_size = target_box[3:6]
+    pred_volume_cm3 = float(np.prod(pred_size))
+    target_volume_cm3 = float(np.prod(target_size))
     volume_error_cm3 = float(abs(pred_volume_cm3 - target_volume_cm3))
     volume_error_ratio = float(volume_error_cm3 / target_volume_cm3)
-    size_consistent = bool(volume_error_ratio <= float(volume_error_ratio_threshold))
+    axis_size_errors_cm = np.abs(pred_size - target_size)
+    axis_size_error_sum_cm = float(np.sum(axis_size_errors_cm))
+    volume_pass = bool(volume_error_ratio <= float(volume_error_ratio_threshold))
+    axis_size_pass = bool(axis_size_error_sum_cm <= float(axis_size_error_sum_threshold_cm))
+    size_consistent = bool(volume_pass and axis_size_pass)
     return {
         "evaluated": True,
         "size_consistent": size_consistent,
+        "volume_pass": volume_pass,
+        "axis_size_pass": axis_size_pass,
         "pred_volume_cm3": pred_volume_cm3,
         "target_volume_cm3": target_volume_cm3,
         "volume_error_cm3": volume_error_cm3,
         "volume_error_ratio": volume_error_ratio,
         "volume_error_ratio_threshold": float(volume_error_ratio_threshold),
+        "axis_size_errors_cm": axis_size_errors_cm.tolist(),
+        "axis_size_error_sum_cm": axis_size_error_sum_cm,
+        "axis_size_error_sum_threshold_cm": float(axis_size_error_sum_threshold_cm),
+        "size_pass_rule": (
+            "volume_error_ratio <= volume_error_ratio_threshold and "
+            "axis_size_error_sum_cm <= axis_size_error_sum_threshold_cm"
+        ),
     }
 
 
@@ -657,6 +675,11 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         for item in size_items
         if item.get("size", {}).get("volume_error_ratio") is not None
     ]
+    axis_size_error_sums_cm = [
+        float(item.get("size", {}).get("axis_size_error_sum_cm", 0.0))
+        for item in size_items
+        if item.get("size", {}).get("axis_size_error_sum_cm") is not None
+    ]
     return {
         "sample_count": sample_count,
         "full_metric_count": len(full_items),
@@ -685,6 +708,8 @@ def summarize_metric_records(records: Sequence[Mapping[str, Any]]) -> dict[str, 
         "median_volume_error_cm3": _safe_median(volume_errors_cm3),
         "mean_volume_error_ratio": _safe_mean(volume_error_ratios),
         "median_volume_error_ratio": _safe_median(volume_error_ratios),
+        "mean_axis_size_error_sum_cm": _safe_mean(axis_size_error_sums_cm),
+        "median_axis_size_error_sum_cm": _safe_median(axis_size_error_sums_cm),
     }
 
 

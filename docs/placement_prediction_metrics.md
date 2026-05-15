@@ -161,16 +161,21 @@ direction_correct = pred_relation == expected_relation
 
 目标：判断预测 3D box 尺寸是否与原目标物体尺寸一致。
 
-比较 `pred_box_world[3:6]` 与 `target_box_world[3:6]` 的体积：
+比较 `pred_box_world[3:6]` 与 `target_box_world[3:6]` 的体积相对误差和三轴尺寸绝对误差之和：
 
 ```text
 volume_error_ratio = abs(pred_volume - target_volume) / target_volume
+axis_size_error_sum_cm =
+    abs(pred_sx - target_sx)
+  + abs(pred_sy - target_sy)
+  + abs(pred_sz - target_sz)
 ```
 
 默认通过条件：
 
 ```text
 volume_error_ratio <= volume_error_ratio_threshold
+AND axis_size_error_sum_cm <= axis_size_error_sum_threshold_cm
 ```
 
 输出字段包括：
@@ -181,6 +186,10 @@ volume_error_ratio <= volume_error_ratio_threshold
 - `volume_error_cm3`
 - `volume_error_ratio`
 - `volume_error_ratio_threshold`
+- `axis_size_errors_cm`
+- `axis_size_error_sum_cm`
+- `axis_size_error_sum_threshold_cm`
+- `size_pass_rule`
 
 ### 4. Object-Center-In-Target
 
@@ -244,6 +253,7 @@ summary 中的覆盖率含义：
 - `overall_metric_coverage`: 四类 metric 都成功计算的样本比例
 - `mean_occupied_collision_ratio` / `median_occupied_collision_ratio`: 已评估样本的 OCCUPIED 体素碰撞比例统计
 - `mean_unknown_overlap_ratio` / `median_unknown_overlap_ratio`: 已评估样本的 UNKNOWN 体素覆盖比例统计
+- `mean_axis_size_error_sum_cm` / `median_axis_size_error_sum_cm`: 已评估样本的三轴尺寸绝对误差之和统计
 
 `placement_success_rate` 只在三类 placement metric 都成功计算的样本上统计。`overall_success_rate` 会额外要求 `object_center_match` 通过。
 
@@ -265,7 +275,8 @@ conda run -n spatial python tools/evaluate_benchmark_predictions.py \
     --predictions outputs/infer_ptv3/predictions.json \
     --output-dir outputs/infer_ptv3_benchmark_eval_strict \
     --collision-ratio-threshold 0.005 \
-    --volume-error-ratio-threshold 0.08
+    --volume-error-ratio-threshold 0.08 \
+    --axis-size-error-sum-threshold-cm 5.0
 ```
 
 快速 smoke test 可只评测前几个样本：
